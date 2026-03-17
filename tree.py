@@ -1,24 +1,16 @@
-class Message:
-    def __init__(self, id, root, embedding, text, timestamp, user, timeline_parent, semantic_parent, concept_id):
+class Turn:
+    def __init__(self, id, root, embedding, user_text, ai_text, timestamp, timeline_parent, semantic_parents, concept_ids):
         self.id = id
         self.root = root
         self.embedding = embedding
-        self.text = text
+        self.user_text = user_text
+        self.ai_text = ai_text
         self.timestamp = timestamp
-        self.user = user
         self.timeline_parent = timeline_parent
-        self.semantic_parents: list[tuple[int, str]] = semantic_parent
-        self.concept_ids: list[int] = concept_id
-    
+        self.semantic_parents: list[tuple[int, str]] = semantic_parents
+        self.concept_ids: list[int] = concept_ids
+
     def __str__(self):
-        return f"Message(id={self.id}, user={self.user}, text='{self.text}'), timeline_parent={self.timeline_parent}, semantic_parents={self.semantic_parents}, concept_ids={self.concept_ids})"
-
-
-
-class Concept:
-    def __init__(self, id, name, description):
-        self.id = id
-        self.name = name
-        self.description = description
-        
-        
+        return (f"Turn(id={self.id}, user='{self.user_text}', ai='{self.ai_text}', "
+                f"timeline_parent={self.timeline_parent}, semantic_parents={self.semantic_parents}, "
+                f"concept_ids={self.concept_ids})")
