@@ -1,0 +1,58 @@
+[
+  {
+    "name": "branch clarification",
+    "previousUserText": "What is Python?",
+    "previousAiText": "Python is a high-level interpreted programming language.",
+    "userText": "What do you mean by interpreted?",
+    "expectedLabel": "branch"
+  },
+  {
+    "name": "branch reference follow-up",
+    "previousUserText": "Why should I use indexing in a database?",
+    "previousAiText": "Indexing speeds up lookups by avoiding full table scans.",
+    "userText": "Why does that matter for large tables?",
+    "expectedLabel": "branch"
+  },
+  {
+    "name": "continuation implementation",
+    "previousUserText": "How do I build a Flask API?",
+    "previousAiText": "Start by creating the Flask app and defining a basic route.",
+    "userText": "How do I add authentication next?",
+    "expectedLabel": "continuation"
+  },
+  {
+    "name": "continuation comparison",
+    "previousUserText": "What is TCP?",
+    "previousAiText": "TCP is a reliable transport protocol focused on ordered delivery.",
+    "userText": "How does it compare to UDP?",
+    "expectedLabel": "continuation"
+  },
+  {
+    "name": "related parallel definition",
+    "previousUserText": "What are cats?",
+    "previousAiText": "Cats are small domesticated mammals.",
+    "userText": "What are dogs?",
+    "expectedLabel": "related"
+  },
+  {
+    "name": "related lateral shift",
+    "previousUserText": "How do I build a Flask API?",
+    "previousAiText": "Start by creating the Flask app and defining a basic route.",
+    "userText": "What about FastAPI instead?",
+    "expectedLabel": "related"
+  },
+  {
+    "name": "unrelated topic switch",
+    "previousUserText": "How do I center a div?",
+    "previousAiText": "Use flexbox with justify-content and align-items set to center.",
+    "userText": "What is the capital of France?",
+    "expectedLabel": "unrelated"
+  },
+  {
+    "name": "unrelated distant topic",
+    "previousUserText": "Why are leaves green?",
+    "previousAiText": "Leaves are green because chlorophyll reflects green light.",
+    "userText": "How do I write a binary search in Python?",
+    "expectedLabel": "unrelated"
+  }
+]

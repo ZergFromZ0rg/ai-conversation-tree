@@ -1,34 +1,46 @@
 from datetime import datetime
+from functools import lru_cache
 from tree import Turn
 
 import numpy as np
 import re
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
-BI_ENCODER_MODEL_NAME = 'all-MiniLM-L6-v2'
-CROSS_ENCODER_MODEL_NAME = 'cross-encoder/ms-marco-MiniLM-L-6-v2'
+biEncoderModelName = 'all-MiniLM-L6-v2'
+crossEncoderModelName = 'cross-encoder/ms-marco-MiniLM-L-6-v2'
 
-model = SentenceTransformer(BI_ENCODER_MODEL_NAME)
-cross_encoder = CrossEncoder(CROSS_ENCODER_MODEL_NAME)
+model = SentenceTransformer(biEncoderModelName)
+crossEncoder = CrossEncoder(crossEncoderModelName)
 turns: list[Turn] = []
+conceptMembers: dict[int, list[int]] = {}
+conceptEmbeddingSums: dict[int, np.ndarray] = {}
+conceptTurnCounts: dict[int, int] = {}
 
-concept_counter = 0
+conceptCounter = 0
 
 THRESHOLD = 0.55
-CONTINUATION_THRESHOLD = 0.55
-CLOSE_GAP = 0.05
-WEAK_THRESHOLD = 0.35
-BRANCH_MIN_SCORE = 1.0
-CONTINUATION_MIN_SCORE = 1.2
-RELATED_MIN_SCORE = 2.25
-RELATED_SIMILARITY_THRESHOLD = THRESHOLD
-EDGE_CONFIDENCE_THRESHOLD = 0.55
-PARALLEL_DEFINITION_RELATED_THRESHOLD = 0.3
-MAX_PARENTS = 2
-SHORT_MSG_WORDS = 5
+continuationThreshold = 0.55
+closeGap = 0.05
+weakThreshold = 0.35
+minEmbeddingFloor = 0.12
+branchMinScore = 1.0
+continuationMinScore = 1.2
+relatedMinScore = 2.25
+relatedSimilarityThreshold = THRESHOLD
+edgeConfidenceThreshold = 0.5
+candidateSignalThreshold = 0.52
+crossCandidateThreshold = 0.5
+parallelDefinitionRelatedThreshold = 0.3
+maxParents = 2
+shortMsgWords = 5
+topConcepts = 3
+maxCandidatesPerConcept = 3
+maxOlderCandidates = 5
+conceptScoreMargin = 0.08
+olderTurnDecay = 0.005
 
 # Discourse markers for classification (improved patterns)
-CLARIFICATION_PATTERNS = [
+clarificationPatterns = [
     "what do you mean",
     "can you clarify",
     "explain",
@@ -37,17 +49,20 @@ CLARIFICATION_PATTERNS = [
     "does that mean",
 ]
 
-REFERENCE_PATTERNS = [
-    "that",
-    "this",
-    "it",
+referencePatterns = [
     "you said",
     "you mentioned",
     "above",
     "previous",
 ]
 
-FORWARD_PATTERNS = [
+pronounReferencePatterns = [
+    "that",
+    "this",
+    "it",
+]
+
+forwardPatterns = [
     "how do i",
     "how do we",
     "implement",
@@ -63,14 +78,16 @@ FORWARD_PATTERNS = [
     "continue",
 ]
 
-TOPIC_SHIFT_PATTERNS = [
+topicShiftPatterns = [
     "what about",
     "similar to",
     "like",
     "alternative",
+    "instead",
+    "another option",
 ]
 
-COMPARISON_PATTERNS = [
+comparisonPatterns = [
     "difference between",
     "differences between",
     "compare",
@@ -80,12 +97,22 @@ COMPARISON_PATTERNS = [
     "versus",
 ]
 
-DEFINITION_PREFIXES = (
+followupPatterns = [
+    "what if",
+    "can i",
+    "should i",
+    "when do i",
+    "when should i",
+    "where do i",
+    "which one",
+]
+
+definitionPrefixes = (
     "what is ",
     "what are ",
 )
 
-STOPWORDS = {
+stopwords = {
     "a",
     "an",
     "and",
@@ -104,38 +131,122 @@ STOPWORDS = {
     "whats",
 }
 
+# Basic text helpers
 
-def next_id():
+def nextId():
     return len(turns)
 
 
-def normalize_word(word: str) -> str:
+@lru_cache(maxsize=2048)
+def encodeText(text: str):
+    return model.encode(text)
+
+
+def normalizeWord(word: str) -> str:
     if len(word) > 3 and word.endswith("s"):
         return word[:-1]
     return word
 
 
-def content_terms(text: str) -> set[str]:
+def contentTerms(text: str) -> set[str]:
     words = re.findall(r"[a-z0-9']+", text.lower())
-    return {normalize_word(word) for word in words if word not in STOPWORDS}
+    return {normalizeWord(word) for word in words if word not in stopwords}
 
 
-def has_comparison_with_prior_topic(features: dict) -> bool:
-    return features["comparison_score"] > 0 and features["content_overlap"] > 0
+def countPatternMatches(text: str, patterns: list[str]) -> int:
+    # Match whole phrases so short tokens like "it" do not fire inside unrelated words.
+    count = 0
+    for pattern in patterns:
+        escaped = re.escape(pattern).replace(r"\ ", r"\s+")
+        if re.search(rf"\b{escaped}\b", text):
+            count += 1
+    return count
 
 
-def allows_candidate(similarity: float, features: dict) -> bool:
+# Discourse signals and gating
+
+def hasComparisonWithPriorTopic(features: dict) -> bool:
+    return features["comparisonScore"] > 0 and features["contentOverlap"] > 0
+
+
+def hasComparisonFollowup(features: dict) -> bool:
+    # A comparison only counts when it is anchored to the prior topic.
     return (
-        similarity >= WEAK_THRESHOLD
-        or (
-            features["parallel_definition_score"] > 0
-            and similarity >= PARALLEL_DEFINITION_RELATED_THRESHOLD
+        features["comparisonScore"] > 0
+        and (
+            features["contentOverlap"] > 0
+            or features["pronounReferenceScore"] > 0
+            or features["userTopicSimilarity"] >= parallelDefinitionRelatedThreshold
         )
-        or has_comparison_with_prior_topic(features)
     )
 
 
-def score_to_confidence(score: float, threshold: float) -> float:
+def hasForwardAnchor(similarity: float, features: dict) -> bool:
+    # Prevent generic "how do I" questions from becoming continuations without topic overlap.
+    return (
+        similarity >= minEmbeddingFloor
+        or features["userTopicSimilarity"] >= minEmbeddingFloor
+        or features["answerSimilarity"] >= minEmbeddingFloor
+        or features["contentOverlap"] > 0
+    )
+
+
+def hasDiscourseSignal(features: dict) -> bool:
+    return any(
+        (
+            features["clarificationScore"] > 0,
+            features["referenceScore"] > 0,
+            features["pronounReferenceScore"] > 0,
+            features["forwardScore"] > 0,
+            features["topicShiftScore"] > 0,
+            features["comparisonScore"] > 0,
+            features["parallelDefinitionScore"] > 0,
+            features["followupQuestionScore"] > 0,
+        )
+    )
+
+def candidateSignalStrength(similarity: float, features: dict, crossScores: dict) -> float:
+    # Blend weak semantic and discourse evidence into one gate score.
+    signal = 0.4 * max(similarity, 0.0)
+    signal += 0.15 * features["userTopicSimilarity"]
+    signal += 0.1 * features["answerSimilarity"]
+    signal += 0.12 * min(
+        1.0,
+        features["clarificationScore"] + features["referenceScore"] + 0.5 * features["pronounReferenceScore"],
+    )
+    signal += 0.1 * min(1.0, features["forwardScore"] + features["followupQuestionScore"])
+    signal += 0.08 * min(1.0, features["topicShiftScore"] + features["comparisonScore"])
+    signal += 0.1 * max(crossScores.values())
+    if hasComparisonFollowup(features):
+        signal += 0.08
+    if (
+        features["parallelDefinitionScore"] > 0
+        and similarity >= parallelDefinitionRelatedThreshold
+    ):
+        signal += 0.12
+    return min(1.0, signal)
+
+
+def allowsCandidate(similarity: float, features: dict, crossScores: dict) -> bool:
+    # Reject only clearly bad matches; borderline cases can still be saved by final scoring.
+    if similarity >= weakThreshold:
+        return True
+    if (
+        features["parallelDefinitionScore"] > 0
+        and similarity >= parallelDefinitionRelatedThreshold
+    ):
+        return True
+    if hasComparisonFollowup(features):
+        return True
+    if similarity < minEmbeddingFloor and not hasDiscourseSignal(features):
+        return False
+    return (
+        candidateSignalStrength(similarity, features, crossScores) >= candidateSignalThreshold
+        or max(crossScores.values()) >= crossCandidateThreshold
+    )
+
+
+def scoreToConfidence(score: float, threshold: float) -> float:
     if threshold <= 0:
         return 0.0
     return max(0.0, min(1.0, score / threshold))
@@ -145,82 +256,142 @@ def sigmoid(score: float) -> float:
     return float(1.0 / (1.0 + np.exp(-score)))
 
 
-def cross_encoder_score(user_text: str, context: str) -> float:
+# Model scoring helpers
+
+def embeddingSimilarity(leftEmbedding, rightEmbedding) -> float:
+    return model.similarity(
+        leftEmbedding.reshape(1, -1),
+        rightEmbedding.reshape(1, -1),
+    ).item()
+
+
+def crossEncoderScore(userText: str, context: str) -> float:
     """
     Score how relevant a context is to the new user question.
     """
-    clean_context = context.strip()
-    if not clean_context:
+    cleanContext = context.strip()
+    if not cleanContext:
         return 0.0
 
-    raw_score = cross_encoder.predict([(user_text, clean_context)])[0]
-    return sigmoid(float(raw_score))
+    rawScore = crossEncoder.predict([(userText, cleanContext)])[0]
+    if np.isnan(rawScore):
+        return 0.0
+    safeScore = float(np.nan_to_num(rawScore, nan=0.0, posinf=20.0, neginf=-20.0))
+    return sigmoid(safeScore)
 
 
-def score_cross_encoder_labels(previous_user_text: str, previous_ai_text: str, user_text: str) -> dict:
+def scoreCrossEncoderLabels(previousUserText: str, previousAiText: str, userText: str) -> dict:
     """
-    Use label-specific cross-encoder inputs instead of sharing one relevance score.
+    Use label-specific cross-encoder prompts instead of sharing one relevance score.
     """
-    full_previous_turn = f"{previous_user_text}\n{previous_ai_text}"
+    # Each label gets a different prompt because it depends on different prior context.
+    fullPreviousTurn = f"{previousUserText}\n{previousAiText}"
+    branchContext = (
+        "Relationship: branch follow-up that depends on the assistant's last answer.\n"
+        f"Previous assistant answer: {previousAiText}"
+    )
+    continuationContext = (
+        "Relationship: continuation of the same topic.\n"
+        f"Previous turn:\n{fullPreviousTurn}"
+    )
+    relatedContext = (
+        "Relationship: related lateral topic shift.\n"
+        f"Previous user topic: {previousUserText}\n"
+        f"Previous assistant answer: {previousAiText}"
+    )
     return {
-        "branch": cross_encoder_score(user_text, previous_ai_text),
-        "continuation": cross_encoder_score(user_text, full_previous_turn),
-        "related": cross_encoder_score(user_text, previous_user_text),
+        "branch": round(
+            0.6 * crossEncoderScore(userText, previousAiText)
+            + 0.4 * crossEncoderScore(userText, branchContext),
+            3,
+        ),
+        "continuation": round(
+            0.65 * crossEncoderScore(userText, fullPreviousTurn)
+            + 0.35 * crossEncoderScore(userText, continuationContext),
+            3,
+        ),
+        "related": round(
+            0.55 * crossEncoderScore(userText, previousUserText)
+            + 0.45 * crossEncoderScore(userText, relatedContext),
+            3,
+        ),
     }
 
 
-def extract_discourse_features(user_text: str, previous_user_text: str, previous_ai_text: str) -> dict:
+# Feature extraction
+
+def extractDiscourseFeatures(userText: str, previousUserText: str, previousAiText: str) -> dict:
     """
     Extract discourse-level feature scores from the current and previous messages.
     
     Returns a dict with numeric scores for each feature type.
     """
-    user_lower = user_text.lower()
-    prev_lower = (previous_user_text + " " + previous_ai_text).lower()
+    userLower = userText.lower()
+    prevLower = (previousUserText + " " + previousAiText).lower()
     
     # Count pattern matches for each category
-    clarification_score = sum(1 for p in CLARIFICATION_PATTERNS if p in user_lower)
-    reference_score = sum(1 for p in REFERENCE_PATTERNS if p in user_lower)
-    forward_score = sum(1 for p in FORWARD_PATTERNS if p in user_lower)
-    topic_shift_score = sum(1 for p in TOPIC_SHIFT_PATTERNS if p in user_lower)
-    comparison_score = sum(1 for p in COMPARISON_PATTERNS if p in user_lower)
-    parallel_definition_score = int(
-        user_lower.startswith(DEFINITION_PREFIXES)
-        and previous_user_text.lower().startswith(DEFINITION_PREFIXES)
+    clarificationScore = countPatternMatches(userLower, clarificationPatterns)
+    referenceScore = countPatternMatches(userLower, referencePatterns)
+    pronounReferenceScore = countPatternMatches(userLower, pronounReferencePatterns)
+    forwardScore = countPatternMatches(userLower, forwardPatterns)
+    topicShiftScore = countPatternMatches(userLower, topicShiftPatterns)
+    comparisonScore = countPatternMatches(userLower, comparisonPatterns)
+    followupQuestionScore = countPatternMatches(userLower, followupPatterns)
+    parallelDefinitionScore = int(
+        userLower.startswith(definitionPrefixes)
+        and previousUserText.lower().startswith(definitionPrefixes)
     )
     
     # Lexical overlap analysis
-    prev_terms = set(prev_lower.split())
-    user_terms = set(user_lower.split())
-    prev_content_terms = content_terms(prev_lower)
-    user_content_terms = content_terms(user_lower)
+    prevTerms = set(prevLower.split())
+    userTerms = set(userLower.split())
+    prevContentTerms = contentTerms(prevLower)
+    userContentTerms = contentTerms(userLower)
     
-    lexical_overlap = 0.0
-    new_term_ratio = 0.0
-    content_overlap = 0.0
-    if user_terms:
-        lexical_overlap = len(prev_terms & user_terms) / len(user_terms)
-        new_term_ratio = len(user_terms - prev_terms) / len(user_terms)
-    if user_content_terms:
-        content_overlap = len(prev_content_terms & user_content_terms) / len(user_content_terms)
+    lexicalOverlap = 0.0
+    newTermRatio = 0.0
+    contentOverlap = 0.0
+    if userTerms:
+        lexicalOverlap = len(prevTerms & userTerms) / len(userTerms)
+        newTermRatio = len(userTerms - prevTerms) / len(userTerms)
+    if userContentTerms:
+        contentOverlap = len(prevContentTerms & userContentTerms) / len(userContentTerms)
+
+    # Add semantic similarities alongside phrase features so paraphrases still register.
+    userEmbedding = encodeText(userText)
+    previousUserEmbedding = encodeText(previousUserText)
+    previousAiEmbedding = encodeText(previousAiText) if previousAiText.strip() else None
+    userTopicSimilarity = embeddingSimilarity(userEmbedding, previousUserEmbedding)
+    answerSimilarity = (
+        embeddingSimilarity(userEmbedding, previousAiEmbedding)
+        if previousAiEmbedding is not None
+        else 0.0
+    )
     
     features = {
-        "clarification_score": clarification_score,
-        "reference_score": reference_score,
-        "forward_score": forward_score,
-        "topic_shift_score": topic_shift_score,
-        "comparison_score": comparison_score,
-        "parallel_definition_score": parallel_definition_score,
-        "lexical_overlap": lexical_overlap,
-        "new_term_ratio": new_term_ratio,
-        "content_overlap": content_overlap,
-        "is_short": len(user_text.split()) <= SHORT_MSG_WORDS,
+        "clarificationScore": clarificationScore,
+        "referenceScore": referenceScore,
+        "pronounReferenceScore": pronounReferenceScore,
+        "forwardScore": forwardScore,
+        "topicShiftScore": topicShiftScore,
+        "comparisonScore": comparisonScore,
+        "followupQuestionScore": followupQuestionScore,
+        "parallelDefinitionScore": parallelDefinitionScore,
+        "lexicalOverlap": lexicalOverlap,
+        "newTermRatio": newTermRatio,
+        "contentOverlap": contentOverlap,
+        "userTopicSimilarity": userTopicSimilarity,
+        "answerSimilarity": answerSimilarity,
+        "isShort": len(userText.split()) <= shortMsgWords,
+        "endsWithQuestion": userText.strip().endswith("?"),
     }
     
     return features
 
 
-def score_edge_labels(similarity: float, features: dict) -> dict:
+# Label scoring
+
+def scoreEdgeLabels(similarity: float, features: dict) -> dict:
     """
     Score each possible edge label using weighted features.
     
@@ -236,55 +407,80 @@ def score_edge_labels(similarity: float, features: dict) -> dict:
     
     # Branch: Requires both clarification/reference intent AND sufficient prior context
     # Clarifications like "what do you mean?" need the previous answer to make sense
-    scores["branch"] += 2.5 * features["clarification_score"]
-    scores["branch"] += 1.5 * features["reference_score"]
+    scores["branch"] += 2.5 * features["clarificationScore"]
+    scores["branch"] += 1.5 * features["referenceScore"]
+    scores["branch"] += 0.5 * features["pronounReferenceScore"]
+    scores["branch"] += 1.0 * features["followupQuestionScore"]
+    scores["branch"] += 0.9 * features["answerSimilarity"]
     # Only penalize short messages if they lack clarification intent
-    if features["is_short"] and features["clarification_score"] == 0:
+    if features["isShort"] and features["clarificationScore"] == 0:
         scores["branch"] -= 0.5
     
     # Continuation: Moves the topic forward on the same thread
     # Similarity strengthens continuation, but should not create it by itself.
-    has_forward_intent = features["forward_score"] > 0
-    has_comparison_intent = has_comparison_with_prior_topic(features)
-    if has_forward_intent:
-        scores["continuation"] += 2.5 * features["forward_score"]
-    if has_comparison_intent:
-        scores["continuation"] += 2.0 * features["comparison_score"]
-    if has_forward_intent or has_comparison_intent:
+    hasForwardIntent = features["forwardScore"] > 0 and hasForwardAnchor(similarity, features)
+    hasComparisonIntent = hasComparisonFollowup(features)
+    if hasForwardIntent:
+        scores["continuation"] += 2.5 * features["forwardScore"]
+    if hasComparisonIntent:
+        scores["continuation"] += 2.0 * features["comparisonScore"]
+    if hasForwardIntent or hasComparisonIntent:
         scores["continuation"] += 2.0 * similarity
-        scores["continuation"] += 0.5 * features["content_overlap"]
+        scores["continuation"] += 0.5 * features["contentOverlap"]
+    scores["continuation"] += 0.8 * features["userTopicSimilarity"]
+    scores["continuation"] += 0.5 * features["answerSimilarity"]
     
     # Related: Lateral jump within same domain
     # Topic shifts with new terminology are typical
-    scores["related"] += 2.0 * features["topic_shift_score"]
-    scores["related"] += 1.0 * similarity
-    scores["related"] += 1.5 * features["new_term_ratio"]  # Introducing new concepts
-    scores["related"] += 1.2 * features["parallel_definition_score"]
+    scores["related"] += 2.0 * features["topicShiftScore"]
+    scores["related"] += 0.85 * similarity
+    scores["related"] += 1.0 * features["newTermRatio"]  # Introducing new concepts
+    scores["related"] += 1.2 * features["parallelDefinitionScore"]
+    scores["related"] += 0.9 * features["userTopicSimilarity"]
+    scores["related"] += 0.7 * max(0.0, features["userTopicSimilarity"] - features["answerSimilarity"])
     
     return scores
 
 
-def judge_edge_label(
+def judgeEdgeLabel(
     similarity: float,
     features: dict,
-    label_scores: dict,
-    cross_scores: dict,
+    labelScores: dict,
+    crossScores: dict,
 ) -> dict:
     """
     Convert heuristic label scores plus cross-encoder evidence into label confidences.
     """
-    has_dependency_signal = (
-        features["clarification_score"] > 0
-        or features["reference_score"] > 0
+    # Only compute confidence for labels that have some supporting signal.
+    hasDependencySignal = (
+        features["clarificationScore"] > 0
+        or features["referenceScore"] > 0
+        or (
+            features["pronounReferenceScore"] > 0
+            and features["answerSimilarity"] >= parallelDefinitionRelatedThreshold
+        )
+        or (
+            features["followupQuestionScore"] > 0
+            and features["answerSimilarity"] >= parallelDefinitionRelatedThreshold
+        )
     )
-    has_continuation_signal = (
-        features["forward_score"] > 0
-        or has_comparison_with_prior_topic(features)
+    hasContinuationSignal = (
+        hasForwardAnchor(similarity, features) and features["forwardScore"] > 0
+        or hasComparisonFollowup(features)
+        or features["comparisonScore"] > 0
+        or (
+            features["userTopicSimilarity"] >= THRESHOLD
+            and features["answerSimilarity"] >= parallelDefinitionRelatedThreshold
+        )
     )
-    has_related_signal = (
-        features["topic_shift_score"] > 0
-        or features["parallel_definition_score"] > 0
-        or label_scores["related"] >= RELATED_MIN_SCORE
+    hasRelatedSignal = (
+        features["topicShiftScore"] > 0
+        or features["parallelDefinitionScore"] > 0
+        or labelScores["related"] >= relatedMinScore
+        or (
+            features["userTopicSimilarity"] >= parallelDefinitionRelatedThreshold
+            and features["newTermRatio"] >= 0.5
+        )
     )
 
     confidences = {
@@ -294,120 +490,229 @@ def judge_edge_label(
         "unrelated": 0.0,
     }
 
-    if has_dependency_signal:
-        heuristic_confidence = score_to_confidence(label_scores["branch"], BRANCH_MIN_SCORE)
+    if hasDependencySignal:
+        heuristicConfidence = scoreToConfidence(labelScores["branch"], branchMinScore)
         confidences["branch"] = (
-            0.55 * heuristic_confidence
-            + 0.45 * cross_scores["branch"]
+            0.55 * heuristicConfidence
+            + 0.25 * crossScores["branch"]
+            + 0.15 * features["answerSimilarity"]
+            + 0.05 * min(
+                1.0,
+                features["referenceScore"] + features["clarificationScore"] + 0.5 * features["pronounReferenceScore"],
+            )
         )
 
-    if has_continuation_signal:
-        heuristic_confidence = score_to_confidence(label_scores["continuation"], CONTINUATION_MIN_SCORE)
+    if hasContinuationSignal:
+        heuristicConfidence = scoreToConfidence(labelScores["continuation"], continuationMinScore)
         confidences["continuation"] = (
-            0.45 * heuristic_confidence
-            + 0.4 * cross_scores["continuation"]
-            + 0.15 * similarity
+            0.55 * heuristicConfidence
+            + 0.2 * crossScores["continuation"]
+            + 0.1 * similarity
+            + 0.1 * features["userTopicSimilarity"]
+            + 0.05 * min(1.0, features["forwardScore"] + features["comparisonScore"])
         )
 
     if (
-        has_related_signal
+        hasRelatedSignal
         and (
-            similarity >= RELATED_SIMILARITY_THRESHOLD
+            similarity >= relatedSimilarityThreshold
             or (
-                features["parallel_definition_score"] > 0
-                and similarity >= PARALLEL_DEFINITION_RELATED_THRESHOLD
+                features["parallelDefinitionScore"] > 0
+                and similarity >= parallelDefinitionRelatedThreshold
+            )
+            or (
+                features["topicShiftScore"] > 0
+                and features["userTopicSimilarity"] >= 0.18
             )
         )
     ):
-        heuristic_confidence = score_to_confidence(label_scores["related"], RELATED_MIN_SCORE)
+        heuristicConfidence = scoreToConfidence(labelScores["related"], relatedMinScore)
         confidences["related"] = (
-            0.45 * heuristic_confidence
-            + 0.35 * cross_scores["related"]
-            + 0.2 * max(similarity, WEAK_THRESHOLD)
+            0.5 * heuristicConfidence
+            + 0.15 * crossScores["related"]
+            + 0.15 * max(similarity, weakThreshold)
+            + 0.15 * features["userTopicSimilarity"]
+            + 0.05 * min(1.0, features["topicShiftScore"] + features["parallelDefinitionScore"])
         )
         if (
-            features["parallel_definition_score"] > 0
-            and similarity >= PARALLEL_DEFINITION_RELATED_THRESHOLD
+            features["parallelDefinitionScore"] > 0
+            and similarity >= parallelDefinitionRelatedThreshold
         ):
-            confidences["related"] = max(confidences["related"], EDGE_CONFIDENCE_THRESHOLD)
+            confidences["related"] = max(confidences["related"], edgeConfidenceThreshold)
 
-    strongest_edge_confidence = max(
+    strongestEdgeConfidenceValue = max(
         confidences["branch"],
         confidences["continuation"],
         confidences["related"],
     )
-    confidences["unrelated"] = round(max(0.0, 1.0 - strongest_edge_confidence), 3)
+    confidences["unrelated"] = round(max(0.0, 1.0 - strongestEdgeConfidenceValue), 3)
 
     return {label: round(confidence, 3) for label, confidence in confidences.items()}
 
 
-def select_edge_label(confidences: dict) -> tuple[str, float] | None:
-    edge_confidences = {
+def selectEdgeLabel(confidences: dict) -> tuple[str, float] | None:
+    edgeConfidences = {
         label: confidence
         for label, confidence in confidences.items()
         if label != "unrelated"
     }
-    best_label = max(edge_confidences, key=edge_confidences.get)
-    best_confidence = edge_confidences[best_label]
+    bestLabel = max(edgeConfidences, key=edgeConfidences.get)
+    bestConfidence = edgeConfidences[bestLabel]
 
-    if confidences["unrelated"] >= best_confidence:
+    if confidences["unrelated"] >= bestConfidence:
         return None
-    if best_confidence < EDGE_CONFIDENCE_THRESHOLD:
+    if bestConfidence < edgeConfidenceThreshold:
         return None
 
-    return best_label, best_confidence
+    return bestLabel, bestConfidence
 
 
-def analyze_immediate_relationship(
-    previous_user_text: str,
-    previous_ai_text: str,
-    user_text: str,
+def strongestEdgeConfidence(confidences: dict) -> float:
+    return max(
+        confidences["branch"],
+        confidences["continuation"],
+        confidences["related"],
+    )
+
+
+# Concept index helpers
+
+def registerTurnInConcepts(turn: Turn):
+    # Update the per-concept cache incrementally instead of rebuilding it from all turns.
+    for conceptId in turn.conceptIds:
+        conceptMembers.setdefault(conceptId, []).append(turn.id)
+        if conceptId in conceptEmbeddingSums:
+            conceptEmbeddingSums[conceptId] = conceptEmbeddingSums[conceptId] + turn.embedding
+            conceptTurnCounts[conceptId] += 1
+        else:
+            conceptEmbeddingSums[conceptId] = np.array(turn.embedding, copy=True)
+            conceptTurnCounts[conceptId] = 1
+
+
+def conceptTurnIds(conceptId: int) -> list[int]:
+    return conceptMembers.get(conceptId, [])
+
+
+def conceptCentroid(conceptId: int):
+    # The centroid is the running average embedding for one concept.
+    turnCount = conceptTurnCounts.get(conceptId, 0)
+    if turnCount == 0:
+        return None
+    return conceptEmbeddingSums[conceptId] / turnCount
+
+
+def conceptSimilarityScores(embedding) -> list[tuple[int, float]]:
+    scored = []
+    for conceptId in sorted(conceptTurnCounts):
+        centroid = conceptCentroid(conceptId)
+        score = embeddingSimilarity(embedding, centroid)
+        scored.append((conceptId, score))
+    return sorted(scored, key=lambda item: item[1], reverse=True)
+
+
+def retrieveCrossLinkCandidates(embedding, timelineParent: int | None) -> list[tuple[int, float]]:
+    # Retrieve older candidates in two stages: top concepts first, then top turns inside them.
+    conceptScores = conceptSimilarityScores(embedding)
+    if not conceptScores:
+        return []
+
+    topConceptScore = conceptScores[0][1]
+    selectedConcepts = [
+        (conceptId, score)
+        for conceptId, score in conceptScores[:topConcepts]
+        if score >= topConceptScore - conceptScoreMargin
+    ]
+
+    scoredCandidates = {}
+    for conceptId, conceptScore in selectedConcepts:
+        memberIds = [
+            turnId for turnId in conceptTurnIds(conceptId)
+            if turnId != timelineParent
+        ]
+        if not memberIds:
+            continue
+        conceptTurnScores = []
+        for turnId in memberIds:
+            similarity = embeddingSimilarity(embedding, turns[turnId].embedding)
+            agePenalty = olderTurnDecay * max(0, len(turns) - 1 - turnId)
+            adjustedScore = similarity - agePenalty + 0.15 * conceptScore
+            conceptTurnScores.append((turnId, adjustedScore))
+
+        conceptTurnScores.sort(key=lambda item: item[1], reverse=True)
+        for turnId, adjustedScore in conceptTurnScores[:maxCandidatesPerConcept]:
+            existing = scoredCandidates.get(turnId)
+            if existing is None or adjustedScore > existing:
+                scoredCandidates[turnId] = adjustedScore
+
+    return sorted(
+        scoredCandidates.items(),
+        key=lambda item: item[1],
+        reverse=True,
+    )[:maxOlderCandidates]
+
+
+# Relationship analyzers
+
+def analyzeImmediateRelationship(
+    previousUserText: str,
+    previousAiText: str,
+    userText: str,
     similarity: float | None = None,
 ) -> dict:
     if similarity is None:
-        previous_embedding = model.encode(previous_user_text + " " + previous_ai_text)
-        user_embedding = model.encode(user_text)
+        previousEmbedding = model.encode(previousUserText + " " + previousAiText)
+        userEmbedding = model.encode(userText)
         similarity = model.similarity(
-            user_embedding.reshape(1, -1),
-            previous_embedding.reshape(1, -1),
+            userEmbedding.reshape(1, -1),
+            previousEmbedding.reshape(1, -1),
         ).item()
 
-    features = extract_discourse_features(user_text, previous_user_text, previous_ai_text)
-    label_scores = score_edge_labels(similarity, features)
-    cross_scores = score_cross_encoder_labels(previous_user_text, previous_ai_text, user_text)
-    confidences = judge_edge_label(similarity, features, label_scores, cross_scores)
-    selected_edge = select_edge_label(confidences) if allows_candidate(similarity, features) else None
+    features = extractDiscourseFeatures(userText, previousUserText, previousAiText)
+    crossScores = scoreCrossEncoderLabels(previousUserText, previousAiText, userText)
+    labelScores = scoreEdgeLabels(similarity, features)
+    confidences = judgeEdgeLabel(similarity, features, labelScores, crossScores)
+    candidateAllowed = allowsCandidate(similarity, features, crossScores)
+    if not candidateAllowed and strongestEdgeConfidence(confidences) < edgeConfidenceThreshold:
+        selectedEdge = None
+    else:
+        selectedEdge = selectEdgeLabel(confidences)
 
     return {
-        "candidate_allowed": allows_candidate(similarity, features),
+        "candidateAllowed": candidateAllowed,
+        "candidateSignalStrength": round(candidateSignalStrength(similarity, features, crossScores), 3),
         "similarity": round(similarity, 3),
         "features": features,
-        "heuristic_scores": {label: round(score, 3) for label, score in label_scores.items()},
-        "cross_encoder_scores": cross_scores,
+        "heuristicScores": {label: round(score, 3) for label, score in labelScores.items()},
+        "crossEncoderScores": crossScores,
         "confidences": confidences,
-        "selected_label": selected_edge[0] if selected_edge is not None else "unrelated",
-        "selected_confidence": selected_edge[1] if selected_edge is not None else confidences["unrelated"],
+        "selectedLabel": selectedEdge[0] if selectedEdge is not None else "unrelated",
+        "selectedConfidence": selectedEdge[1] if selectedEdge is not None else confidences["unrelated"],
     }
 
 
-def classify_semantic_cross_link(parent_id: int, user_text: str, similarity: float) -> tuple[str, float]:
-    parent = turns[parent_id]
-    features = extract_discourse_features(user_text, parent.user_text, parent.ai_text)
-    cross_scores = score_cross_encoder_labels(parent.user_text, parent.ai_text, user_text)
-    if has_comparison_with_prior_topic(features):
-        label_scores = score_edge_labels(similarity, features)
+def classifySemanticCrossLink(parentId: int, userText: str, similarity: float) -> tuple[str, float]:
+    # Older links only choose between continuation and related.
+    parent = turns[parentId]
+    features = extractDiscourseFeatures(userText, parent.userText, parent.aiText)
+    crossScores = scoreCrossEncoderLabels(parent.userText, parent.aiText, userText)
+    if hasComparisonFollowup(features):
+        labelScores = scoreEdgeLabels(similarity, features)
         confidence = (
-            0.6 * score_to_confidence(label_scores["continuation"], CONTINUATION_MIN_SCORE)
-            + 0.4 * cross_scores["continuation"]
+            0.6 * scoreToConfidence(labelScores["continuation"], continuationMinScore)
+            + 0.4 * crossScores["continuation"]
         )
-        return "continuation", round(max(confidence, EDGE_CONFIDENCE_THRESHOLD), 3)
-    return "related", round(max(similarity, EDGE_CONFIDENCE_THRESHOLD), 3)
+        return "continuation", round(max(confidence, edgeConfidenceThreshold), 3)
+    relatedConfidence = max(
+        edgeConfidenceThreshold,
+        0.65 * similarity + 0.2 * features["userTopicSimilarity"] + 0.15 * crossScores["related"],
+    )
+    return "related", round(relatedConfidence, 3)
 
 
 def immediatePreviousTurnClassifier(
     embedding, 
-    timeline_parent_id: int, 
-    user_text: str
+    timelineParentId: int, 
+    userText: str
 ) -> tuple[int, str, float] | None:
     """
     3-layer classifier for the immediate previous turn.
@@ -416,176 +721,175 @@ def immediatePreviousTurnClassifier(
     Layer 2: Discourse feature scoring (heuristic baseline)
     Layer 3: Cross-encoder final relationship confidence
     
-    Returns (parent_id, "continuation" | "branch" | "related", confidence) or None.
+    Returns (parentId, "continuation" | "branch" | "related", confidence) or None.
     """
-    parent = turns[timeline_parent_id]
+    # The immediate previous turn gets the full label set and strongest classifier.
+    parent = turns[timelineParentId]
     
     # Layer 1: Embedding similarity (candidate filter)
-    score_to_parent = model.similarity(embedding.reshape(1, -1), parent.embedding.reshape(1, -1)).item()
+    scoreToParent = embeddingSimilarity(embedding, parent.embedding)
     
-    features = extract_discourse_features(user_text, parent.user_text, parent.ai_text)
-
-    if not allows_candidate(score_to_parent, features):
-        # Too dissimilar — no connection, new root
-        return None
+    features = extractDiscourseFeatures(userText, parent.userText, parent.aiText)
+    crossScores = scoreCrossEncoderLabels(parent.userText, parent.aiText, userText)
     
     # Layer 2: Discourse feature scoring (heuristic baseline)
-    label_scores = score_edge_labels(score_to_parent, features)
+    labelScores = scoreEdgeLabels(scoreToParent, features)
     
     # Layer 3: cross-encoder label-specific confidence
-    cross_scores = score_cross_encoder_labels(parent.user_text, parent.ai_text, user_text)
-    confidences = judge_edge_label(score_to_parent, features, label_scores, cross_scores)
-    judged_label = select_edge_label(confidences)
-    if judged_label is not None:
-        label, confidence = judged_label
-        return (timeline_parent_id, label, confidence)
+    confidences = judgeEdgeLabel(scoreToParent, features, labelScores, crossScores)
+    candidateAllowed = allowsCandidate(scoreToParent, features, crossScores)
+    if not candidateAllowed and strongestEdgeConfidence(confidences) < edgeConfidenceThreshold:
+        return None
+    judgedLabel = selectEdgeLabel(confidences)
+    if judgedLabel is not None:
+        label, confidence = judgedLabel
+        return (timelineParentId, label, confidence)
     
     return None
 
 
-def find_semantic_parents(embedding, timeline_parent: int | None, user_text: str) -> list[tuple[int, str, float]]:
+def findSemanticParents(embedding, timelineParent: int | None, userText: str) -> list[tuple[int, str, float]]:
     """
     Find all turns the new turn should attach to in the graph.
 
     Step 1: classify against the immediately preceding turn using discourse analysis.
     Step 2: scan all previous turns for other high-similarity matches (cross-thread related).
 
-    Returns a list of (turn_id, "continuation" | "branch" | "related", confidence) edges.
+    Returns a list of (turnId, "continuation" | "branch" | "related", confidence) edges.
     """
     if not turns:
         return []
 
-    # step 1: relationship with the immediately previous turn (2-layer classifier)
-    timeline_result = immediatePreviousTurnClassifier(embedding, timeline_parent, user_text) if timeline_parent is not None else None
+    # Step 1 handles the timeline parent; step 2 looks for older semantic cross-links.
+    timelineResult = immediatePreviousTurnClassifier(embedding, timelineParent, userText) if timelineParent is not None else None
 
-    # step 2: compare against all previous turns at once
-    all_embeddings = np.array([t.embedding for t in turns])
-    scores = model.similarity(embedding.reshape(1, -1), all_embeddings)[0].tolist()
+    # step 2: retrieve candidate concepts, then score only their member turns
+    scored = retrieveCrossLinkCandidates(embedding, timelineParent)
+    if not scored:
+        return [timelineResult] if timelineResult is not None else []
 
-    # rank all turns from most to least similar
-    scored = sorted(zip([t.id for t in turns], scores), key=lambda x: x[1], reverse=True)
+    bestScore = scored[0][1]
+    semanticResults = []
+    hasComparisonQuestion = countPatternMatches(userText.lower(), comparisonPatterns) > 0
 
-    best_score = scored[0][1]
-    semantic_results = []
-    has_comparison_question = any(pattern in user_text.lower() for pattern in COMPARISON_PATTERNS)
-
-    if best_score >= THRESHOLD or has_comparison_question:
+    if bestScore >= THRESHOLD or hasComparisonQuestion:
         for id, score in scored:
-            if len(semantic_results) >= MAX_PARENTS:
+            if len(semanticResults) >= maxParents:
                 break
-            if id == timeline_parent:
-                # already handled in step 1
-                continue
-            cross_features = extract_discourse_features(user_text, turns[id].user_text, turns[id].ai_text)
-            if has_comparison_with_prior_topic(cross_features):
-                label, confidence = classify_semantic_cross_link(id, user_text, score)
-                semantic_results.append((id, label, confidence))
-            elif score >= best_score - CLOSE_GAP:
+            crossFeatures = extractDiscourseFeatures(userText, turns[id].userText, turns[id].aiText)
+            if hasComparisonFollowup(crossFeatures):
+                label, confidence = classifySemanticCrossLink(id, userText, score)
+                semanticResults.append((id, label, confidence))
+            elif score >= bestScore - closeGap:
                 # semantically close but not the timeline parent → classify cross-link
-                label, confidence = classify_semantic_cross_link(id, user_text, score)
-                semantic_results.append((id, label, confidence))
+                label, confidence = classifySemanticCrossLink(id, userText, score)
+                semanticResults.append((id, label, confidence))
 
     # timeline result goes first, related cross-links after
-    if timeline_result is not None:
-        return [timeline_result] + semantic_results
-    return semantic_results
+    if timelineResult is not None:
+        return [timelineResult] + semanticResults
+    return semanticResults
 
 
-def add_turn(user_text: str, ai_text: str) -> Turn:
+def addTurn(userText: str, aiText: str) -> Turn:
     """
     Create a new turn from a user message and AI response, attach it to the graph,
     and assign it to the appropriate concept(s).
     """
-    global concept_counter
+    global conceptCounter
 
     # the previous turn in the timeline (always the last one added)
-    timeline_parent = turns[-1].id if turns else None
+    timelineParent = turns[-1].id if turns else None
 
     # use the new user question to classify its relationship to existing turns
-    user_embedding = model.encode(user_text)
+    userEmbedding = encodeText(userText)
 
     # store the full turn embedding for future semantic context
-    combined = user_text + " " + ai_text
-    embedding = model.encode(combined)
+    combined = userText + " " + aiText
+    embedding = encodeText(combined)
 
     # find which previous turns this turn relates to, and how
-    semantic_parents = find_semantic_parents(user_embedding, timeline_parent, user_text)
+    semanticParents = findSemanticParents(userEmbedding, timelineParent, userText)
 
     # no semantic parents → this turn starts a new topic
-    root = len(semantic_parents) == 0
+    root = len(semanticParents) == 0
 
     if root:
         # new concept: assign the next available concept id
-        concept_ids = [concept_counter]
-        concept_counter += 1
+        conceptIds = [conceptCounter]
+        conceptCounter += 1
     else:
         # inherit concept ids from all semantic parents (deduplicated)
         # if parents span two concepts, this turn belongs to both
         seen = set()
-        concept_ids = []
-        for parent_id, _, _ in semantic_parents:
-            for cid in turns[parent_id].concept_ids:
+        conceptIds = []
+        for parentId, _, _ in semanticParents:
+            for cid in turns[parentId].conceptIds:
                 if cid not in seen:
                     seen.add(cid)
-                    concept_ids.append(cid)
+                    conceptIds.append(cid)
 
     turn = Turn(
-        id=next_id(),
+        id=nextId(),
         root=root,
         embedding=embedding,
-        user_text=user_text,
-        ai_text=ai_text,
+        userText=userText,
+        aiText=aiText,
         timestamp=datetime.now(),
-        timeline_parent=timeline_parent,
-        semantic_parents=semantic_parents,
-        concept_ids=concept_ids,
+        timelineParent=timelineParent,
+        semanticParents=semanticParents,
+        conceptIds=conceptIds,
     )
     turns.append(turn)
+    registerTurnInConcepts(turn)
     return turn
 
 
-def reset_conversation():
-    global concept_counter
+def resetConversation():
+    global conceptCounter
 
     turns.clear()
-    concept_counter = 0
+    conceptMembers.clear()
+    conceptEmbeddingSums.clear()
+    conceptTurnCounts.clear()
+    conceptCounter = 0
 
 
-def reclassify_turns() -> list[Turn]:
-    existing_turns = [
-        (turn.user_text, turn.ai_text, turn.timestamp)
+def reclassifyTurns() -> list[Turn]:
+    existingTurns = [
+        (turn.userText, turn.aiText, turn.timestamp)
         for turn in turns
     ]
 
-    reset_conversation()
+    resetConversation()
 
-    rebuilt_turns = []
-    for user_text, ai_text, timestamp in existing_turns:
-        turn = add_turn(user_text, ai_text)
+    rebuiltTurns = []
+    for userText, aiText, timestamp in existingTurns:
+        turn = addTurn(userText, aiText)
         turn.timestamp = timestamp
-        rebuilt_turns.append(turn)
+        rebuiltTurns.append(turn)
 
-    return rebuilt_turns
+    return rebuiltTurns
 
 
 def main():
     print("Conversation tree (type 'quit' to exit, 'history' to see turns)\n")
     while True:
-        user_input = input("u: ").strip()
-        if not user_input:
+        userInput = input("u: ").strip()
+        if not userInput:
             continue
-        if user_input.lower() == "quit":
+        if userInput.lower() == "quit":
             break
-        if user_input.lower() == "history":
+        if userInput.lower() == "history":
             for t in turns:
                 print(f"  {t}")
             continue
 
-        ai_input = input("a: ").strip()
-        if not ai_input:
+        aiInput = input("a: ").strip()
+        if not aiInput:
             continue
 
-        add_turn(user_input, ai_input) 
+        addTurn(userInput, aiInput) 
 
 
 if __name__ == "__main__":
