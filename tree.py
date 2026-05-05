@@ -7,7 +7,7 @@ class Turn:
         self.ai_text = ai_text
         self.timestamp = timestamp
         self.timeline_parent = timeline_parent
-        self.semantic_parents: list[tuple[int, str]] = semantic_parents
+        self.semantic_parents: list[tuple[int, str, float]] = semantic_parents
         self.concept_ids: list[int] = concept_ids
 
     def __str__(self):
