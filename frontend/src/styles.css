@@ -1,0 +1,480 @@
+:root {
+  color-scheme: dark;
+  --bg: #101418;
+  --panel: #171c22;
+  --panel-2: #1e252d;
+  --panel-3: #252e38;
+  --text: #e7edf3;
+  --muted: #8d9aa7;
+  --border: rgba(255, 255, 255, 0.08);
+  --accent-2: #3b82f6;
+  --shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg);
+}
+
+body {
+  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--text);
+}
+
+button,
+textarea {
+  font: inherit;
+}
+
+button {
+  border: none;
+  border-radius: 14px;
+  background: var(--panel-3);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.18s ease;
+}
+
+button:hover {
+  background: #313c48;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.appShell {
+  position: relative;
+  min-height: 100vh;
+  display: flex;
+  overflow: hidden;
+}
+
+.drawer {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  width: 320px;
+  background: rgba(23, 28, 34, 0.96);
+  backdrop-filter: blur(20px);
+  box-shadow: var(--shadow);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  transition: transform 0.24s ease;
+}
+
+.leftDrawer {
+  left: 0;
+  transform: translateX(-100%);
+  border-right: 1px solid var(--border);
+}
+
+.rightDrawer {
+  right: 0;
+  transform: translateX(100%);
+  border-left: 1px solid var(--border);
+}
+
+.drawer.open {
+  transform: translateX(0);
+}
+
+.drawerHeader {
+  padding: 18px 18px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.drawerTitle {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.drawerBody {
+  flex: 1;
+  overflow: auto;
+  padding: 16px;
+}
+
+.fullWidthButton {
+  width: 100%;
+}
+
+.conversationList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.conversationItem {
+  width: 100%;
+  text-align: left;
+  padding: 12px 14px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 16px;
+}
+
+.conversationItem:hover {
+  background: var(--panel-2);
+  border-color: var(--border);
+}
+
+.conversationItem.active {
+  background: #222d39;
+  border-color: rgba(138, 180, 248, 0.26);
+}
+
+.conversationName {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.conversationMeta {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.mainPanel {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0 24px;
+}
+
+.topBar {
+  height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.topBarGroup {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.titleBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.titleBlock h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.titleMeta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.iconButton {
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+}
+
+.chatViewport {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.chatColumn {
+  width: min(880px, 100%);
+  height: 100%;
+  min-height: 0;
+}
+
+.messages {
+  height: 100%;
+  overflow: auto;
+  padding: 28px 0 20px;
+}
+
+.turnGroup {
+  margin-bottom: 22px;
+}
+
+.messageRow {
+  display: flex;
+}
+
+.messageRow.user {
+  justify-content: flex-end;
+  margin-bottom: 10px;
+}
+
+.assistantBlock {
+  width: 100%;
+}
+
+.messageBubble {
+  max-width: min(82%, 760px);
+  padding: 16px 18px;
+  border-radius: 22px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+.userBubble {
+  background: #2a3440;
+  border: 1px solid var(--border);
+}
+
+.assistantBubble {
+  background: transparent;
+  padding-left: 0;
+}
+
+.messageLabel {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.composerWrap {
+  padding: 16px 0 24px;
+}
+
+.composerCard {
+  width: min(880px, 100%);
+  margin: 0 auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 26px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.composerInput {
+  width: 100%;
+  resize: none;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  padding: 18px 20px 12px;
+  min-height: 72px;
+  max-height: 220px;
+  outline: none;
+}
+
+.composerFooter {
+  padding: 12px 14px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.composerHint,
+.graphMeta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.primaryButton {
+  background: var(--accent-2);
+  color: white;
+  padding: 10px 18px;
+}
+
+.primaryButton:hover {
+  background: #2563eb;
+}
+
+.graphActions {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.graphContainer {
+  height: calc(100vh - 185px);
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: #12171d;
+  overflow: hidden;
+}
+
+.graphTurnNode {
+  width: 260px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #182029;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
+  padding: 12px 14px;
+}
+
+.graphTurnNode.root {
+  border-color: rgba(245, 158, 11, 0.5);
+}
+
+.graphNodeHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #cbd5e1;
+}
+
+.graphNodeConcepts {
+  color: #8ab4f8;
+}
+
+.graphNodeSection + .graphNodeSection {
+  margin-top: 10px;
+}
+
+.graphNodeLabel {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.graphNodeText {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.graphNodeMuted {
+  color: #d1d5db;
+}
+
+.graphHandle {
+  width: 10px;
+  height: 10px;
+  border: 1px solid #0f172a;
+  background: #64748b;
+}
+
+.react-flow__controls {
+  border: 1px solid var(--border);
+  box-shadow: none;
+}
+
+.react-flow__controls-button {
+  background: #1f2937;
+  border-bottom: 1px solid var(--border);
+  color: #e5e7eb;
+}
+
+.react-flow__attribution {
+  display: none;
+}
+
+.emptyState {
+  max-width: 640px;
+  margin: 12vh auto 0;
+  text-align: center;
+  color: var(--muted);
+  padding: 0 20px;
+}
+
+.emptyState h2 {
+  margin: 0 0 12px;
+  font-size: 28px;
+  color: var(--text);
+}
+
+.statusToast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  padding: 12px 16px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  z-index: 60;
+  min-width: 280px;
+  text-align: center;
+  box-shadow: var(--shadow);
+}
+
+.statusToast.success {
+  background: rgba(31, 143, 95, 0.95);
+}
+
+.statusToast.error {
+  background: rgba(166, 61, 64, 0.96);
+}
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.32);
+  z-index: 20;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+.backdrop.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (max-width: 900px) {
+  .mainPanel {
+    padding: 0 14px;
+  }
+
+  .drawer {
+    width: min(88vw, 320px);
+  }
+
+  .topBar {
+    height: 64px;
+  }
+
+  .titleBlock h1 {
+    font-size: 16px;
+  }
+
+  .messageBubble {
+    max-width: 92%;
+  }
+}
