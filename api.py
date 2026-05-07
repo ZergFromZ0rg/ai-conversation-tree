@@ -1,18 +1,32 @@
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-from chatService import createConversationSession, listConversationSessions, loadConversationSession, processChatMessage
-from db import initDb
-from graphService import analyzeImmediateRelationship, reclassifyTurns, resetConversation, turns
+from pydantic import BaseModel, Field
 
-frontendDistDir = Path(__file__).parent / "frontend" / "dist"
+from chatService import (
+    analyzeConversation,
+    buildInMemoryGraphPayload,
+    createConversationEdge,
+    createConversationSession,
+    deleteConversationSession,
+    getConversationSession,
+    listConversationGraph,
+    listConversationSessions,
+    listConversationTurns,
+    patchConversationEdge,
+    processChatMessage,
+    removeConversationEdge,
+)
+from db import initDb
+from graphService import analyzeImmediateRelationship
+
 
 app = FastAPI()
 initDb()
+frontendDistDir = Path(__file__).parent / "frontend" / "dist"
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,11 +40,59 @@ app.add_middleware(
 )
 
 if frontendDistDir.exists():
+    app.mount("/assets", StaticFiles(directory=frontendDistDir / "assets"), name="assets")
     app.mount("/ui/assets", StaticFiles(directory=frontendDistDir / "assets"), name="ui-assets")
+
+
+class CreateConversationRequest(BaseModel):
+    title: str | None = None
+
+
+class CreateTurnRequest(BaseModel):
+    userText: str = Field(min_length=1)
+
+
+class ImmediateDebugRequest(BaseModel):
+    previousUserText: str
+    previousAiText: str
+    userText: str
+
+
+class CreateEdgeRequest(BaseModel):
+    conversationId: int
+    fromTurnId: int
+    toTurnId: int
+    label: str
+    confidence: float
+
+
+class UpdateEdgeRequest(BaseModel):
+    label: str | None = None
+    confidence: float | None = None
+
 
 @app.get("/")
 def root():
-    return {"message": "AI Conversation Tree API", "endpoints": ["/chat", "/graph", "/ui"]}
+    return {
+        "message": "AI Conversation Tree API",
+        "endpoints": [
+            "GET /graph",
+            "GET /ui",
+            "POST /conversations",
+            "GET /conversations",
+            "GET /conversations/{conversationId}",
+            "DELETE /conversations/{conversationId}",
+            "POST /conversations/{conversationId}/turns",
+            "GET /conversations/{conversationId}/turns",
+            "POST /conversations/{conversationId}/analyze",
+            "GET /conversations/{conversationId}/graph",
+            "POST /edges",
+            "PATCH /edges/{edgeId}",
+            "DELETE /edges/{edgeId}",
+            "POST /debug/immediate",
+        ],
+    }
+
 
 @app.get("/ui")
 def ui():
@@ -38,7 +100,7 @@ def ui():
     if not indexPath.exists():
         return JSONResponse(
             {
-                "error": "React frontend not built.",
+                "error": "Frontend not built.",
                 "next": [
                     "cd frontend",
                     "npm install",
@@ -49,25 +111,8 @@ def ui():
         )
     return FileResponse(indexPath, media_type="text/html")
 
-class ChatRequest(BaseModel):
-    conversationId: int
-    userText: str
 
-
-class CreateConversationRequest(BaseModel):
-    title: str | None = None
-
-class ImmediateDebugRequest(BaseModel):
-    previousUserText: str
-    previousAiText: str
-    userText: str
-
-@app.post("/chat")
-def chat(req: ChatRequest):
-    return processChatMessage(req.conversationId, req.userText)
-
-
-@app.post("/conversations")
+@app.post("/conversations", status_code=status.HTTP_201_CREATED)
 def createConversation(req: CreateConversationRequest):
     return createConversationSession(req.title)
 
@@ -79,18 +124,81 @@ def listConversations():
 
 @app.get("/conversations/{conversationId}")
 def getConversation(conversationId: int):
-    return loadConversationSession(conversationId)
+    conversation = getConversationSession(conversationId)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return conversation
 
-@app.post("/reset")
-def reset():
-    resetConversation()
-    return {"nodes": 0, "edges": 0}
 
-@app.post("/reclassify")
-def reclassify():
-    rebuiltTurns = reclassifyTurns()
-    edgeCount = sum(len(turn.semanticParents) for turn in rebuiltTurns)
-    return {"nodes": len(rebuiltTurns), "edges": edgeCount}
+@app.delete("/conversations/{conversationId}", status_code=status.HTTP_204_NO_CONTENT)
+def deleteConversation(conversationId: int):
+    deleted = deleteConversationSession(conversationId)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/conversations/{conversationId}/turns", status_code=status.HTTP_201_CREATED)
+def createTurn(conversationId: int, req: CreateTurnRequest):
+    if getConversationSession(conversationId) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return processChatMessage(conversationId, req.userText)
+
+
+@app.get("/conversations/{conversationId}/turns")
+def getTurns(conversationId: int):
+    if getConversationSession(conversationId) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return listConversationTurns(conversationId)
+
+
+@app.post("/conversations/{conversationId}/analyze")
+def analyze(conversationId: int):
+    if getConversationSession(conversationId) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return analyzeConversation(conversationId)
+
+
+@app.get("/conversations/{conversationId}/graph")
+def getGraph(conversationId: int):
+    if getConversationSession(conversationId) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return listConversationGraph(conversationId)
+
+
+@app.get("/graph")
+def getCurrentGraph():
+    return buildInMemoryGraphPayload()
+
+
+@app.post("/edges", status_code=status.HTTP_201_CREATED)
+def createEdge(req: CreateEdgeRequest):
+    if getConversationSession(req.conversationId) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return createConversationEdge(
+        conversationId=req.conversationId,
+        fromTurnId=req.fromTurnId,
+        toTurnId=req.toTurnId,
+        label=req.label,
+        confidence=req.confidence,
+    )
+
+
+@app.patch("/edges/{edgeId}")
+def updateEdge(edgeId: int, req: UpdateEdgeRequest):
+    edge = patchConversationEdge(edgeId, label=req.label, confidence=req.confidence)
+    if edge is None:
+        raise HTTPException(status_code=404, detail="Edge not found.")
+    return edge
+
+
+@app.delete("/edges/{edgeId}", status_code=status.HTTP_204_NO_CONTENT)
+def deleteEdge(edgeId: int):
+    deleted = removeConversationEdge(edgeId)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Edge not found.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
 
 @app.post("/debug/immediate")
 def debugImmediate(req: ImmediateDebugRequest):
@@ -99,17 +207,3 @@ def debugImmediate(req: ImmediateDebugRequest):
         req.previousAiText,
         req.userText,
     )
-
-@app.get("/graph")
-def graph():
-    return {
-        "nodes": [
-            {"id": t.id, "userText": t.userText, "aiText": t.aiText, "conceptIds": t.conceptIds}
-            for t in turns
-        ],
-        "edges": [
-            {"from": parentId, "to": t.id, "type": rel, "confidence": confidence}
-            for t in turns
-            for parentId, rel, confidence in t.semanticParents
-        ],
-    }

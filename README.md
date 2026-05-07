@@ -1,119 +1,106 @@
 # AI Conversation Tree
 
-`AI Conversation Tree` is a local full-stack proof-of-concept that turns a chat into a semantic graph.
+`AI Conversation Tree` is a local-first proof of concept for analyzing chat structure.
 
-Instead of storing a conversation as a flat list of messages, this project classifies how each new turn relates to earlier turns and visualizes those relationships as a tree/graph. It combines:
+It takes a sequence of user/assistant turns, classifies how each new turn relates to earlier turns, stores the result, and renders the conversation as a graph.
 
-- embeddings for semantic similarity
-- discourse-feature heuristics for conversational intent
-- cross-encoder scoring for label-specific relevance
-- `SQLite` persistence for saved conversations
-- a `FastAPI` backend and browser UI for chat + graph exploration
+Current goals:
 
-This project is meant to be a strong local demo and portfolio piece rather than a production system.
+- validate graph logic
+- persist conversations locally
+- test with local models through `Ollama`
+- provide a simple graph viewer for inspection
+
+This is not intended to be production-ready. It is intended to be technically solid, explainable, and useful as a portfolio project.
 
 ## What It Does
 
-When a user sends a message, the backend:
+For each new turn, the system decides whether it is:
 
-1. generates an assistant response
-2. embeds the new turn
-3. classifies its relationship to the immediately previous turn
-4. retrieves older relevant turns by concept centroid similarity
-5. assigns semantic edges such as `branch`, `continuation`, or `related`
-6. saves the turn, embeddings, edges, and concept ids
-7. returns updated conversation and graph data to the UI
+- a `continuation` of an existing topic
+- a `branch` off a previous answer or subthread
+- `related` to one or more prior topics
+- effectively unrelated, in which case it starts a new root thread
 
-The result is a conversation that can be explored both as:
+The result is stored as:
 
-- a normal saved chat
-- a graph of semantic relationships across turns
+- conversation records
+- turns
+- semantic edges
+- concept assignments
+- embeddings
 
-## Why This Project Is Interesting
+and rendered as a graph.
 
-This repo demonstrates:
+## Core Approach
 
-- LLM orchestration
-- embedding-based retrieval
-- discourse-aware classification
-- cross-encoder reranking / scoring
-- `SQLite` data modeling
-- API design with `FastAPI`
-- local full-stack product thinking
-- graph-based visualization of conversational structure
+### Immediate Previous Turn
 
-## Current Architecture
+The immediate previous turn gets the strongest classifier.
 
-### Backend
+It uses three signal sources:
+
+- embedding similarity
+- discourse features
+- cross-encoder scores
+
+Those are combined to classify the relationship as:
+
+- `continuation`
+- `branch`
+- `related`
+- or no edge
+
+### Older Prior Turns
+
+Older-turn linking uses retrieval first, then classification.
+
+Current flow:
+
+1. compare the new turn to concept centroids
+2. select the strongest concepts
+3. score turns inside those concepts
+4. classify selected older links as `continuation` or `related`
+
+This avoids a full scan over the entire conversation history on every turn.
+
+### Important Design Principle
+
+Topic identity should dominate continuation decisions.
+
+Discourse features are used as supporting evidence, not as ground truth. This reduces false positives where generic follow-up phrasing looks like continuation even when the topic changed.
+
+## Tech Stack
+
+- `Python`
+- `FastAPI`
+- `SQLite`
+- `Pydantic`
+- `NumPy`
+- `sentence-transformers`
+- `CrossEncoder`
+- `PyTorch`
+- `React Flow`
+- `Ollama` for local response generation
+
+## Project Structure
 
 - `api.py`
   - HTTP routes
 - `chatService.py`
-  - orchestration flow for chat, LLM calls, persistence, and response payloads
+  - orchestration, provider calls, graph payload serialization
 - `graphService.py`
-  - semantic classification and graph-building logic
+  - classification logic, concept retrieval, reanalysis
 - `db.py`
-  - `SQLite` schema and persistence helpers
+  - `SQLite` schema and helpers
 - `models.py`
-  - app-level data models
-
-### Storage
-
-`SQLite` is the source of truth for:
-
-- conversations
-- turns
-- semantic edges
-- concept ids
-- turn embeddings
-
-The app currently rebuilds in-memory graph state from `SQLite` when a conversation is loaded. That keeps the current graph logic simple while still providing persistence.
-
-### Frontend
-
+  - application data models
 - `frontend/`
-  - Phase 1 React frontend
-  - chat-first layout with:
-    - center linear chat
-    - left conversation drawer
-    - right graph drawer
-- `extension/`
-  - placeholder plan for browser integration
-
-## Classifier Overview
-
-There are two main classification paths.
-
-### 1. Immediate Previous Turn
-
-The immediate previous turn gets the strongest classifier:
-
-- embedding similarity
-- discourse feature extraction
-- label-specific cross-encoder scoring
-- final label selection
-
-Possible labels:
-
-- `branch`
-- `continuation`
-- `related`
-- effectively `unrelated` when no label is strong enough
-
-### 2. Older Prior Turns
-
-Older turns are handled with retrieval first:
-
-- score concept centroids
-- select top concepts
-- score only turns inside those concepts
-- classify each older link as `continuation` or `related`
-
-This avoids scanning the entire conversation history on every message.
+  - minimal graph viewer
 
 ## Persistence Model
 
-The current schema in `db.py` includes:
+`SQLite` stores:
 
 - `conversations`
 - `turns`
@@ -121,15 +108,78 @@ The current schema in `db.py` includes:
 - `turnConcepts`
 - `turnEmbeddings`
 
-Embeddings are stored as JSON text for simplicity in this proof-of-concept.
+Embeddings are currently stored as JSON for simplicity.
 
-## Local Run
+When a conversation is loaded, the backend rebuilds the in-memory graph state from persisted rows.
 
-### 1. Install dependencies
+## API
 
-Create and activate a virtual environment, then install the requirements.
+### Conversation Endpoints
 
-Example:
+- `POST /conversations`
+- `GET /conversations`
+- `GET /conversations/{conversationId}`
+- `DELETE /conversations/{conversationId}`
+
+### Turn Endpoints
+
+- `POST /conversations/{conversationId}/turns`
+- `GET /conversations/{conversationId}/turns`
+
+### Graph Endpoints
+
+- `POST /conversations/{conversationId}/analyze`
+- `GET /conversations/{conversationId}/graph`
+- `GET /graph`
+
+### Edge Correction Endpoints
+
+- `POST /edges`
+- `PATCH /edges/{edgeId}`
+- `DELETE /edges/{edgeId}`
+
+### Debug Endpoint
+
+- `POST /debug/immediate`
+
+## Stable Graph Output
+
+Graph endpoints return stable JSON:
+
+```json
+{
+  "nodes": [
+    {
+      "id": 0,
+      "userText": "what are cats?",
+      "aiText": "...",
+      "conceptIds": [0],
+      "root": true,
+      "timelineParent": null
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "fromTurnId": 0,
+      "toTurnId": 1,
+      "label": "related",
+      "confidence": 0.696
+    }
+  ]
+}
+```
+
+Semantics:
+
+- green edge = `continuation`
+- orange edge = `branch`
+- blue bidirectional edge = `related`
+- orange node border = `root`
+
+## Local Setup
+
+### 1. Python environment
 
 ```bash
 python3 -m venv venv
@@ -137,19 +187,36 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Choose response mode
+### 2. Frontend build
+
+```bash
+cd frontend
+npm install
+npm run build
+cd ..
+```
+
+### 3. Choose a response mode
 
 #### Stub mode
-
-This is the easiest local demo path and does not require an API key.
 
 ```bash
 export AI_CONVERSATION_TREE_STUB_LLM=1
 ```
 
-#### Real OpenAI mode
+#### Ollama mode
 
-This uses the OpenAI Responses API from `chatService.py`.
+Example:
+
+```bash
+export OLLAMA_MODEL=qwen2.5:0.5b
+export OLLAMA_BASE_URL=http://127.0.0.1:11434
+unset AI_CONVERSATION_TREE_STUB_LLM
+```
+
+Use a small model for fast graph testing. The point is to generate turns quickly, not maximize answer quality.
+
+#### OpenAI mode
 
 ```bash
 export OPENAI_API_KEY=your_key_here
@@ -157,167 +224,168 @@ export OPENAI_MODEL=gpt-5-mini
 unset AI_CONVERSATION_TREE_STUB_LLM
 ```
 
-### 3. Start the app
+### 4. Start the app
 
 ```bash
 venv/bin/python -m uvicorn api:app --reload
-```
-
-### 4. Open the UI
-
-#### React UI
-
-The new React frontend lives in `frontend/`.
-
-Start the backend:
-
-```bash
-venv/bin/python -m uvicorn api:app --reload
-```
-
-Then in a second terminal:
-
-```bash
-cd frontend
-npm install
-npm run dev
 ```
 
 Open:
 
-```text
-http://127.0.0.1:5173
+- API: `http://127.0.0.1:8000`
+- Viewer: `http://127.0.0.1:8000/ui`
+
+## Local Workflow
+
+Typical workflow:
+
+1. create a conversation
+2. send turns through the UI or API
+3. inspect the graph
+4. re-run `Analyze` after logic changes
+
+The UI is intentionally minimal. It is for inspecting graph behavior, not for polished chat UX.
+
+## Example Requests
+
+### Create a conversation
+
+```bash
+curl -X POST http://127.0.0.1:8000/conversations \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Test conversation"}'
 ```
 
-The Vite dev server proxies API calls to the FastAPI backend on `http://127.0.0.1:8000`.
+### Add a turn
 
-## Local Milestone Test
+```bash
+curl -X POST http://127.0.0.1:8000/conversations/1/turns \
+  -H "Content-Type: application/json" \
+  -d '{"userText":"What are cats?"}'
+```
 
-This repo includes a small milestone script that checks the first persistence flow:
+### Get the graph
 
-- create a conversation
-- send one message
-- generate/store one turn
-- reload it from `SQLite`
+```bash
+curl http://127.0.0.1:8000/conversations/1/graph
+```
 
-Run:
+### Reanalyze a conversation
+
+```bash
+curl -X POST http://127.0.0.1:8000/conversations/1/analyze
+```
+
+## Verification
+
+Backend syntax:
+
+```bash
+python3 -m py_compile api.py chatService.py graphService.py db.py models.py
+```
+
+Persistence milestone:
 
 ```bash
 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 venv/bin/python testSqliteMilestone.py
 ```
 
-## Useful Endpoints
+Classifier evaluation scripts:
 
-- `POST /conversations`
-- `GET /conversations`
-- `GET /conversations/{conversationId}`
-- `POST /chat`
-- `POST /debug/immediate`
-- `GET /graph`
-
-### Example `POST /chat`
-
-```json
-{
-  "conversationId": 1,
-  "userText": "What is Python?"
-}
+```bash
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 venv/bin/python eval_immediate_previous.py
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 venv/bin/python eval_cross_links.py
 ```
+
+## Current Limitations
+
+- older-turn retrieval still depends on centroid-first heuristics
+- embeddings are stored as JSON, not a native vector type
+- local `Ollama` latency depends heavily on hardware and model size
+- UI is an inspection tool, not a complete chat product
+- graph layout is heuristic, not a full semantic DAG layout engine
+- no auth, multi-user isolation, or production deployment concerns are addressed
+
+## Future Work
+
+### Browser Extension
+
+The most interesting product direction is a browser extension rather than a standalone app.
+
+Goal:
+
+- let users keep using `ChatGPT`, `Claude`, or `Gemini`
+- read the visible conversation from the page
+- build the conversation graph locally
+- render the graph as a side panel
+
+Planned work:
+
+- browser extension scaffold
+- content scripts for site-specific DOM extraction
+- per-site adapters for `ChatGPT`, `Claude`, and `Gemini`
+- local storage of extracted conversations
+- graph viewer injected as a side drawer
+- optional connection to the current local backend for graph construction
+
+### Postgres + pgvector
+
+The current `SQLite` backend is correct for a local proof of concept.
+
+The next backend upgrade would be:
+
+- `Postgres`
+- `pgvector`
+
+Benefits:
+
+- embeddings stored in a native vector column
+- database-side nearest-neighbor search
+- better concurrency and migration path
+- more realistic ML backend architecture
+
+This would replace manual embedding retrieval in Python with database-backed vector search.
+
+### Retrieval Improvements
+
+The current older-turn retrieval uses:
+
+- concept centroids first
+- then turn scoring inside the chosen concepts
+
+That is already better than scanning every turn, but it is still approximate.
+
+Planned improvements:
+
+- maintain a per-concept turn index instead of rescoring all turns in selected concepts
+- refine centroid updates and concept membership logic
+- add stronger topic clustering or subtopic segmentation
+- improve candidate pruning and age decay
+- eventually replace heuristic retrieval with vector search over persisted embeddings
+
+### Model / Classifier Improvements
+
+Planned work:
+
+- add more labeled evaluation cases
+- calibrate thresholds using saved examples
+- improve continuation vs related separation
+- improve branch detection for clarification subthreads
+- add better handling for malformed or low-quality assistant replies
+- make confidence scores more interpretable
+
+### UI / Product Improvements
+
+Planned work:
+
+- better graph legend and filtering
+- node focus / centering and subgraph inspection
+- cleaner tree layout for dense graphs
+- chat-first viewer with graph drawer
+- correction tooling for manually editing edges
 
 ## Notes
 
-- If you created `conversationTree.db` before the latest schema changes, delete it once and let the app recreate it.
-- This project is designed for local use and portfolio/demo value, not production deployment.
-- The current UI is now served from the built React frontend in `frontend/dist`.
-
-## What Exists Right Now
-
-Current implemented pieces:
-
-- semantic graph-building backend
-- immediate-turn and older-turn classification
-- `SQLite` persistence
-- saved conversation loading
-- conversation history sidebar in the UI
-- local browser graph visualization
-- stub or real OpenAI response generation path
-
-## Frontend Folder Structure
-
-### `frontend/`
-
-Phase 1 React app:
-
-- `frontend/src/app.tsx`
-  - app shell and state management
-- `frontend/src/components/conversationSidebar.tsx`
-  - saved chat history drawer
-- `frontend/src/components/chatThread.tsx`
-  - linear conversation view
-- `frontend/src/components/chatComposer.tsx`
-  - message composer
-- `frontend/src/components/graphDrawer.tsx`
-  - right-side graph drawer
-- `frontend/src/lib/api.ts`
-  - typed client for FastAPI endpoints
-- `frontend/src/types.ts`
-  - shared frontend types
-- `frontend/src/styles.css`
-  - app styling
-
-### `extension/`
-
-Future browser integration path:
-
-- browser extension shell
-- content scripts for ChatGPT / Claude / Gemini
-- site-specific turn extraction adapters
-- browser-local storage, likely `IndexedDB`
-- optional localhost connection back to this Python backend for graph construction
-
-## How the Future Extension Should Work
-
-The longer-term browser-companion version should work like this:
-
-1. user chats on an existing AI site
-2. extension reads visible chat turns from the page
-3. extension sends those turns to the local backend
-4. backend runs embeddings, classification, and graph building
-5. extension renders the graph in a side panel
-
-That preserves the current Python graph logic while avoiding extra response-generation API costs inside this project.
-- evaluation scripts for the classifier logic
-
-## Next Steps / Future Improvements
-
-### Phase 1: Product Improvements
-
-- Add a fuller chat history panel beside the graph, not just the conversation list and graph view.
-- Improve the visual design so the tool feels more intentional and polished for demo use.
-- Add message/node linking so selecting a graph node highlights the corresponding turn in the chat view.
-- Add screenshots or a short demo GIF for GitHub and LinkedIn.
-
-### Phase 1: Retrieval Improvements
-
-- The current older-turn retrieval path uses concept centroids to avoid scanning the full conversation history, then scores only turns inside the top matching concepts.
-- A future optimization is to index turns within each concept as well, so once the best concepts are chosen the system can retrieve the top turn candidates directly instead of scanning every turn in those concepts.
-
-### Phase 2: Production-Style Storage
-
-- Migrate from `SQLite` to `Postgres + pgvector` when stronger concurrency and production reliability are needed.
-- Store embeddings in the database and use vector similarity search for semantic retrieval.
-- Move older-turn retrieval and context selection closer to database-level nearest-neighbor queries.
-- Support multi-user conversations and more scalable chat history management.
-
-### Phase 2: ML / System Improvements
-
-- Improve evaluation coverage with larger labeled datasets for immediate-turn and older-turn classification.
-- Add calibrated confidence scoring and richer offline evaluation.
-- Improve retrieval, summarization, and semantic memory for long conversations.
-- Add observability for model calls, retrieval quality, and graph behavior.
-
-## Project Positioning
-
-This is best presented as:
-
-**An AI conversation-graph prototype that uses embeddings, discourse features, and cross-encoder scoring to classify conversational structure, persist chat state, and visualize semantic relationships across turns.**
+- If `conversationTree.db` comes from an older schema version, delete it once and let the app recreate it.
+- If you use `Ollama`, make sure the local Ollama server is running before starting the backend.
+- For quick local testing, use a smaller Ollama model rather than a larger chat model.

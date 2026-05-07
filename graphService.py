@@ -39,6 +39,11 @@ maxCandidatesPerConcept = 3
 maxOlderCandidates = 5
 conceptScoreMargin = 0.08
 olderTurnDecay = 0.005
+strongTopicSimilarityThreshold = 0.25
+strongContentOverlapThreshold = 0.18
+subthreadContinuationSimilarityThreshold = 0.48
+subthreadTopicSimilarityThreshold = 0.5
+subthreadLexicalOverlapThreshold = 0.15
 
 # Discourse markers for classification (improved patterns)
 clarificationPatterns = [
@@ -65,10 +70,14 @@ pronounReferencePatterns = [
 
 forwardPatterns = [
     "how do i",
+    "how would i",
     "how do we",
     "implement",
     "build",
     "use",
+    "learn",
+    "learning",
+    "go about",
     "next",
     "what's next",
     "should i",
@@ -183,13 +192,43 @@ def hasComparisonFollowup(features: dict) -> bool:
 
 
 def hasForwardAnchor(similarity: float, features: dict) -> bool:
-    # Prevent generic "how do I" questions from becoming continuations without topic overlap.
+    # Generic "how do I learn/use X" phrasing should only count as continuation
+    # when topic identity is clearly established, not from incidental overlap.
     return (
-        similarity >= minEmbeddingFloor
-        or features["userTopicSimilarity"] >= minEmbeddingFloor
-        or features["answerSimilarity"] >= minEmbeddingFloor
-        or features["contentOverlap"] > 0
+        similarity >= strongTopicSimilarityThreshold
+        or features["userTopicSimilarity"] >= strongTopicSimilarityThreshold
+        or features["answerSimilarity"] >= strongTopicSimilarityThreshold
+        or features["contentOverlap"] >= strongContentOverlapThreshold
     )
+
+
+def hasParallelDefinitionCrossLink(similarity: float, features: dict) -> bool:
+    return (
+        features["parallelDefinitionScore"] > 0
+        and (
+            similarity >= minEmbeddingFloor
+            or features["userTopicSimilarity"] >= strongTopicSimilarityThreshold
+        )
+    )
+
+
+def hasSubthreadTopicContinuation(parentId: int, similarity: float, features: dict) -> bool:
+    # A follow-up to a branch node can be a true continuation of that subthread
+    # even without generic "how do I" discourse markers.
+    parent = turns[parentId]
+    parentIsBranchTurn = any(label == "branch" for _, label, _ in parent.semanticParents)
+    if not parentIsBranchTurn:
+        return False
+
+    strongTopicMatch = (
+        similarity >= subthreadContinuationSimilarityThreshold
+        or features["userTopicSimilarity"] >= subthreadTopicSimilarityThreshold
+    )
+    explicitSurfaceAnchor = (
+        features["contentOverlap"] >= strongContentOverlapThreshold
+        or features["lexicalOverlap"] >= subthreadLexicalOverlapThreshold
+    )
+    return strongTopicMatch and explicitSurfaceAnchor
 
 
 def hasDiscourseSignal(features: dict) -> bool:
@@ -696,11 +735,16 @@ def classifySemanticCrossLink(parentId: int, userText: str, similarity: float) -
     parent = turns[parentId]
     features = extractDiscourseFeatures(userText, parent.userText, parent.aiText)
     crossScores = scoreCrossEncoderLabels(parent.userText, parent.aiText, userText)
-    if hasComparisonFollowup(features):
-        labelScores = scoreEdgeLabels(similarity, features)
+    labelScores = scoreEdgeLabels(similarity, features)
+    hasForwardContinuation = features["forwardScore"] > 0 and hasForwardAnchor(similarity, features)
+    hasSubthreadContinuation = hasSubthreadTopicContinuation(parentId, similarity, features)
+    if hasComparisonFollowup(features) or (
+        hasForwardContinuation and labelScores["continuation"] >= labelScores["related"]
+    ) or hasSubthreadContinuation:
         confidence = (
             0.6 * scoreToConfidence(labelScores["continuation"], continuationMinScore)
             + 0.4 * crossScores["continuation"]
+            + (0.08 if hasSubthreadContinuation else 0.0)
         )
         return "continuation", round(max(confidence, edgeConfidenceThreshold), 3)
     relatedConfidence = max(
@@ -749,6 +793,46 @@ def immediatePreviousTurnClassifier(
     return None
 
 
+def isSemanticAncestor(descendantId: int, ancestorId: int) -> bool:
+    stack = [descendantId]
+    seen = set()
+
+    while stack:
+        currentId = stack.pop()
+        if currentId in seen or currentId >= len(turns):
+            continue
+        seen.add(currentId)
+        for parentId, _, _ in turns[currentId].semanticParents:
+            if parentId == ancestorId:
+                return True
+            stack.append(parentId)
+
+    return False
+
+
+def pruneLessSpecificSemanticResults(semanticResults: list[tuple[int, str, float]]) -> list[tuple[int, str, float]]:
+    prunedResults: list[tuple[int, str, float]] = []
+
+    for result in semanticResults:
+        parentId, label, confidence = result
+        overshadowed = False
+        for otherParentId, otherLabel, otherConfidence in semanticResults:
+            if otherParentId == parentId:
+                continue
+            if not isSemanticAncestor(otherParentId, parentId):
+                continue
+
+            otherIsMoreSpecific = otherLabel == "continuation" and otherConfidence >= confidence - 0.06
+            if label == "related" and otherIsMoreSpecific:
+                overshadowed = True
+                break
+
+        if not overshadowed:
+            prunedResults.append(result)
+
+    return prunedResults
+
+
 def findSemanticParents(embedding, timelineParent: int | None, userText: str) -> list[tuple[int, str, float]]:
     """
     Find all turns the new turn should attach to in the graph.
@@ -773,7 +857,15 @@ def findSemanticParents(embedding, timelineParent: int | None, userText: str) ->
     semanticResults = []
     hasComparisonQuestion = countPatternMatches(userText.lower(), comparisonPatterns) > 0
 
-    if bestScore >= THRESHOLD or hasComparisonQuestion:
+    hasParallelDefinitionCandidate = any(
+        hasParallelDefinitionCrossLink(
+            score,
+            extractDiscourseFeatures(userText, turns[id].userText, turns[id].aiText),
+        )
+        for id, score in scored[:maxOlderCandidates]
+    )
+
+    if bestScore >= THRESHOLD or hasComparisonQuestion or hasParallelDefinitionCandidate:
         for id, score in scored:
             if len(semanticResults) >= maxParents:
                 break
@@ -781,10 +873,34 @@ def findSemanticParents(embedding, timelineParent: int | None, userText: str) ->
             if hasComparisonFollowup(crossFeatures):
                 label, confidence = classifySemanticCrossLink(id, userText, score)
                 semanticResults.append((id, label, confidence))
+            elif hasParallelDefinitionCrossLink(score, crossFeatures):
+                label, confidence = classifySemanticCrossLink(id, userText, score)
+                semanticResults.append((id, label, confidence))
             elif score >= bestScore - closeGap:
                 # semantically close but not the timeline parent → classify cross-link
                 label, confidence = classifySemanticCrossLink(id, userText, score)
                 semanticResults.append((id, label, confidence))
+
+    semanticResults = pruneLessSpecificSemanticResults(semanticResults)
+
+    if (
+        timelineResult is not None
+        and timelineParent is not None
+        and timelineResult[1] == "continuation"
+    ):
+        timelineConfidence = timelineResult[2]
+        strongerAncestorContinuation = next(
+            (
+                result
+                for result in semanticResults
+                if result[1] == "continuation"
+                and isSemanticAncestor(timelineParent, result[0])
+                and result[2] >= timelineConfidence - 0.05
+            ),
+            None,
+        )
+        if strongerAncestorContinuation is not None:
+            timelineResult = None
 
     # timeline result goes first, related cross-links after
     if timelineResult is not None:

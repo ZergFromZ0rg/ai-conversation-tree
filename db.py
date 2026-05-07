@@ -120,6 +120,47 @@ def listConversations() -> list[dict]:
     ]
 
 
+def getConversation(conversationId: int) -> dict | None:
+    connection = getConnection()
+    try:
+        row = connection.execute(
+            """
+            SELECT id, title, createdAt, updatedAt
+            FROM conversations
+            WHERE id = ?
+            """,
+            (conversationId,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    if row is None:
+        return None
+
+    return {
+        "id": int(row["id"]),
+        "title": row["title"],
+        "createdAt": str(row["createdAt"]),
+        "updatedAt": str(row["updatedAt"]),
+    }
+
+
+def deleteConversation(conversationId: int) -> bool:
+    connection = getConnection()
+    try:
+        cursor = connection.execute(
+            """
+            DELETE FROM conversations
+            WHERE id = ?
+            """,
+            (conversationId,),
+        )
+        connection.commit()
+        return cursor.rowcount > 0
+    finally:
+        connection.close()
+
+
 def saveTurn(
     conversationId: int,
     turnId: int,
@@ -207,6 +248,50 @@ def saveConceptIds(conversationId: int, turnId: int, conceptIds: list[int]):
         connection.close()
 
 
+def replaceTurnConceptIds(conversationId: int, turnId: int, conceptIds: list[int]):
+    connection = getConnection()
+    try:
+        connection.execute(
+            """
+            DELETE FROM turnConcepts
+            WHERE conversationId = ? AND turnId = ?
+            """,
+            (conversationId, turnId),
+        )
+        if conceptIds:
+            connection.executemany(
+                """
+                INSERT INTO turnConcepts (conversationId, turnId, conceptId)
+                VALUES (?, ?, ?)
+                """,
+                [(conversationId, turnId, conceptId) for conceptId in conceptIds],
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def updateTurnMetadata(
+    conversationId: int,
+    turnId: int,
+    root: bool,
+    timelineParent: int | None,
+):
+    connection = getConnection()
+    try:
+        connection.execute(
+            """
+            UPDATE turns
+            SET root = ?, timelineParent = ?
+            WHERE conversationId = ? AND turnId = ?
+            """,
+            (int(root), timelineParent, conversationId, turnId),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def getConversationTurns(conversationId: int) -> list[dict]:
     connection = getConnection()
     try:
@@ -287,3 +372,152 @@ def getConversationTurns(conversationId: int) -> list[dict]:
         )
 
     return turns
+
+
+def listConversationEdges(conversationId: int) -> list[dict]:
+    connection = getConnection()
+    try:
+        rows = connection.execute(
+            """
+            SELECT id, conversationId, fromTurnId, toTurnId, label, confidence
+            FROM semanticEdges
+            WHERE conversationId = ?
+            ORDER BY toTurnId ASC, id ASC
+            """,
+            (conversationId,),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    return [
+        {
+            "id": int(row["id"]),
+            "conversationId": int(row["conversationId"]),
+            "fromTurnId": int(row["fromTurnId"]),
+            "toTurnId": int(row["toTurnId"]),
+            "label": str(row["label"]),
+            "confidence": float(row["confidence"]),
+        }
+        for row in rows
+    ]
+
+
+def createEdge(conversationId: int, fromTurnId: int, toTurnId: int, label: str, confidence: float) -> dict:
+    connection = getConnection()
+    try:
+        cursor = connection.execute(
+            """
+            INSERT INTO semanticEdges (conversationId, fromTurnId, toTurnId, label, confidence)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (conversationId, fromTurnId, toTurnId, label, confidence),
+        )
+        connection.commit()
+        edgeId = int(cursor.lastrowid)
+    finally:
+        connection.close()
+
+    return {
+        "id": edgeId,
+        "conversationId": conversationId,
+        "fromTurnId": fromTurnId,
+        "toTurnId": toTurnId,
+        "label": label,
+        "confidence": confidence,
+    }
+
+
+def updateEdge(edgeId: int, label: str | None = None, confidence: float | None = None) -> dict | None:
+    if label is None and confidence is None:
+        return getEdge(edgeId)
+
+    connection = getConnection()
+    try:
+        fields = []
+        values: list[object] = []
+        if label is not None:
+            fields.append("label = ?")
+            values.append(label)
+        if confidence is not None:
+            fields.append("confidence = ?")
+            values.append(confidence)
+        values.append(edgeId)
+        connection.execute(
+            f"""
+            UPDATE semanticEdges
+            SET {", ".join(fields)}
+            WHERE id = ?
+            """,
+            values,
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    return getEdge(edgeId)
+
+
+def deleteEdge(edgeId: int) -> bool:
+    connection = getConnection()
+    try:
+        cursor = connection.execute(
+            """
+            DELETE FROM semanticEdges
+            WHERE id = ?
+            """,
+            (edgeId,),
+        )
+        connection.commit()
+        return cursor.rowcount > 0
+    finally:
+        connection.close()
+
+
+def getEdge(edgeId: int) -> dict | None:
+    connection = getConnection()
+    try:
+        row = connection.execute(
+            """
+            SELECT id, conversationId, fromTurnId, toTurnId, label, confidence
+            FROM semanticEdges
+            WHERE id = ?
+            """,
+            (edgeId,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    if row is None:
+        return None
+
+    return {
+        "id": int(row["id"]),
+        "conversationId": int(row["conversationId"]),
+        "fromTurnId": int(row["fromTurnId"]),
+        "toTurnId": int(row["toTurnId"]),
+        "label": str(row["label"]),
+        "confidence": float(row["confidence"]),
+    }
+
+
+def replaceConversationEdges(conversationId: int, edges: list[tuple[int, int, str, float]]):
+    connection = getConnection()
+    try:
+        connection.execute(
+            """
+            DELETE FROM semanticEdges
+            WHERE conversationId = ?
+            """,
+            (conversationId,),
+        )
+        if edges:
+            connection.executemany(
+                """
+                INSERT INTO semanticEdges (conversationId, fromTurnId, toTurnId, label, confidence)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [(conversationId, fromTurnId, toTurnId, label, confidence) for fromTurnId, toTurnId, label, confidence in edges],
+            )
+        connection.commit()
+    finally:
+        connection.close()
