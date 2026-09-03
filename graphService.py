@@ -17,7 +17,7 @@ crossEncoder = CrossEncoder(crossEncoderModelName)
 
 @dataclass
 class ConversationGraph:
-    """One conversation's in-memory turn graph and concept indexes.
+    """One conversation's in-memory turn graph.
 
     Every function that reads or mutates this state takes the graph explicitly;
     there is no module-global graph. Callers that mutate a graph must serialize
@@ -25,9 +25,6 @@ class ConversationGraph:
     """
 
     turns: list[TurnModel] = field(default_factory=list)
-    conceptMembers: dict[int, list[int]] = field(default_factory=dict)
-    conceptEmbeddingSums: dict[int, np.ndarray] = field(default_factory=dict)
-    conceptTurnCounts: dict[int, int] = field(default_factory=dict)
     conceptCounter: int = 0
 
 THRESHOLD = 0.55
@@ -45,10 +42,7 @@ crossCandidateThreshold = 0.5
 parallelDefinitionRelatedThreshold = 0.3
 maxParents = 2
 shortMsgWords = 5
-topConcepts = 3
-maxCandidatesPerConcept = 3
 maxOlderCandidates = 5
-conceptScoreMargin = 0.08
 olderTurnDecay = 0.005
 strongTopicSimilarityThreshold = 0.25
 strongContentOverlapThreshold = 0.18
@@ -214,13 +208,21 @@ def hasForwardAnchor(similarity: float, features: dict) -> bool:
 
 
 def hasParallelDefinitionCrossLink(similarity: float, features: dict) -> bool:
-    return (
-        features["parallelDefinitionScore"] > 0
-        and (
-            similarity >= minEmbeddingFloor
-            or features["userTopicSimilarity"] >= strongTopicSimilarityThreshold
-        )
+    # Two "what is X" questions are only a parallel-definition cross-link when
+    # they are actually about the same area. Matching definitional phrasing is
+    # not enough — require both topic proximity and a surface anchor (shared
+    # content terms, or strong topic similarity).
+    if features["parallelDefinitionScore"] == 0:
+        return False
+    hasTopicProximity = (
+        similarity >= parallelDefinitionRelatedThreshold
+        or features["userTopicSimilarity"] >= strongTopicSimilarityThreshold
     )
+    hasSurfaceAnchor = (
+        features["contentOverlap"] > 0
+        or features["userTopicSimilarity"] >= relatedSimilarityThreshold
+    )
+    return hasTopicProximity and hasSurfaceAnchor
 
 
 def hasSubthreadTopicContinuation(graph: ConversationGraph, parentId: int, similarity: float, features: dict) -> bool:
@@ -626,80 +628,23 @@ def strongestEdgeConfidence(confidences: dict) -> float:
     )
 
 
-# Concept index helpers
-
-def registerTurnInConcepts(graph: ConversationGraph, turn: TurnModel):
-    # Update the per-concept cache incrementally instead of rebuilding it from all turns.
-    for conceptId in turn.conceptIds:
-        graph.conceptMembers.setdefault(conceptId, []).append(turn.id)
-        if conceptId in graph.conceptEmbeddingSums:
-            graph.conceptEmbeddingSums[conceptId] = graph.conceptEmbeddingSums[conceptId] + turn.embedding
-            graph.conceptTurnCounts[conceptId] += 1
-        else:
-            graph.conceptEmbeddingSums[conceptId] = np.array(turn.embedding, copy=True)
-            graph.conceptTurnCounts[conceptId] = 1
-
-
-def conceptTurnIds(graph: ConversationGraph, conceptId: int) -> list[int]:
-    return graph.conceptMembers.get(conceptId, [])
-
-
-def conceptCentroid(graph: ConversationGraph, conceptId: int):
-    # The centroid is the running average embedding for one concept.
-    turnCount = graph.conceptTurnCounts.get(conceptId, 0)
-    if turnCount == 0:
-        return None
-    return graph.conceptEmbeddingSums[conceptId] / turnCount
-
-
-def conceptSimilarityScores(graph: ConversationGraph, embedding) -> list[tuple[int, float]]:
-    scored = []
-    for conceptId in sorted(graph.conceptTurnCounts):
-        centroid = conceptCentroid(graph, conceptId)
-        score = embeddingSimilarity(embedding, centroid)
-        scored.append((conceptId, score))
-    return sorted(scored, key=lambda item: item[1], reverse=True)
-
+# Cross-link retrieval
 
 def retrieveCrossLinkCandidates(graph: ConversationGraph, embedding, timelineParent: int | None) -> list[tuple[int, float]]:
-    # Retrieve older candidates in two stages: top concepts first, then top turns inside them.
-    conceptScores = conceptSimilarityScores(graph, embedding)
-    if not conceptScores:
-        return []
-
-    topConceptScore = conceptScores[0][1]
-    selectedConcepts = [
-        (conceptId, score)
-        for conceptId, score in conceptScores[:topConcepts]
-        if score >= topConceptScore - conceptScoreMargin
-    ]
-
-    scoredCandidates = {}
-    for conceptId, conceptScore in selectedConcepts:
-        memberIds = [
-            turnId for turnId in conceptTurnIds(graph, conceptId)
-            if turnId != timelineParent
-        ]
-        if not memberIds:
+    # Direct top-k retrieval: score every prior turn by cosine similarity to the
+    # new turn, with a small decay for older turns. Cheap at this scale and
+    # avoids the concept-centroid layer, whose average embedding is a poor
+    # representative once a concept has drifted.
+    scored = []
+    for turn in graph.turns:
+        if turn.id == timelineParent or turn.embedding is None:
             continue
-        conceptTurnScores = []
-        for turnId in memberIds:
-            similarity = embeddingSimilarity(embedding, graph.turns[turnId].embedding)
-            agePenalty = olderTurnDecay * max(0, len(graph.turns) - 1 - turnId)
-            adjustedScore = similarity - agePenalty + 0.15 * conceptScore
-            conceptTurnScores.append((turnId, adjustedScore))
+        similarity = embeddingSimilarity(embedding, turn.embedding)
+        agePenalty = olderTurnDecay * max(0, len(graph.turns) - 1 - turn.id)
+        scored.append((turn.id, similarity - agePenalty))
 
-        conceptTurnScores.sort(key=lambda item: item[1], reverse=True)
-        for turnId, adjustedScore in conceptTurnScores[:maxCandidatesPerConcept]:
-            existing = scoredCandidates.get(turnId)
-            if existing is None or adjustedScore > existing:
-                scoredCandidates[turnId] = adjustedScore
-
-    return sorted(
-        scoredCandidates.items(),
-        key=lambda item: item[1],
-        reverse=True,
-    )[:maxOlderCandidates]
+    scored.sort(key=lambda item: item[1], reverse=True)
+    return scored[:maxOlderCandidates]
 
 
 # Relationship analyzers
@@ -972,15 +917,11 @@ def addTurn(graph: ConversationGraph, userText: str, aiText: str) -> TurnModel:
         conceptIds=conceptIds,
     )
     graph.turns.append(turn)
-    registerTurnInConcepts(graph, turn)
     return turn
 
 
 def resetConversation(graph: ConversationGraph) -> None:
     graph.turns.clear()
-    graph.conceptMembers.clear()
-    graph.conceptEmbeddingSums.clear()
-    graph.conceptTurnCounts.clear()
     graph.conceptCounter = 0
 
 
@@ -1021,7 +962,6 @@ def loadConversationGraph(conversationId: int) -> ConversationGraph:
             conceptIds=storedTurn["conceptIds"],
         )
         graph.turns.append(turn)
-        registerTurnInConcepts(graph, turn)
 
     maxConceptId = max((conceptId for turn in graph.turns for conceptId in turn.conceptIds), default=-1)
     graph.conceptCounter = maxConceptId + 1

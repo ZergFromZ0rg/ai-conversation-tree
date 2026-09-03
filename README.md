@@ -57,12 +57,13 @@ Older-turn linking uses retrieval first, then classification.
 
 Current flow:
 
-1. compare the new turn to concept centroids
-2. select the strongest concepts
-3. score turns inside those concepts
-4. classify selected older links as `continuation` or `related`
+1. score every earlier turn by cosine similarity to the new turn, minus a small
+   decay for older turns
+2. take the top few candidates
+3. classify each selected older link as `continuation` or `related`
 
-This avoids a full scan over the entire conversation history on every turn.
+At this scale a direct scan is cheap and avoids the concept-centroid layer,
+whose average embedding is a poor representative once a concept has drifted.
 
 ### Important Design Principle
 
@@ -361,7 +362,7 @@ cd frontend && npm run build
 
 ## Current Limitations
 
-- older-turn retrieval still depends on centroid-first heuristics
+- older-turn retrieval is a brute-force cosine scan in Python (fine at this scale, not at large scale)
 - embeddings are stored as JSON, not a native vector type
 - local `Ollama` latency depends heavily on hardware and model size
 - the in-memory graph cache assumes a single backend process (one `uvicorn` worker)
@@ -410,20 +411,15 @@ This would replace manual embedding retrieval in Python with database-backed vec
 
 ### Retrieval Improvements
 
-The current older-turn retrieval uses:
-
-- concept centroids first
-- then turn scoring inside the chosen concepts
-
-That is already better than scanning every turn, but it is still approximate.
+Older-turn retrieval is currently a direct cosine scan over every prior turn's
+embedding, minus a small age decay. That is fine for local conversations but
+does not scale.
 
 Planned improvements:
 
-- maintain a per-concept turn index instead of rescoring all turns in selected concepts
-- refine centroid updates and concept membership logic
-- add stronger topic clustering or subtopic segmentation
-- improve candidate pruning and age decay
-- eventually replace heuristic retrieval with vector search over persisted embeddings
+- vector search over persisted embeddings (see the `pgvector` note above) instead of a Python scan
+- better candidate pruning and age-decay tuning
+- optional topic/subtopic segmentation for large conversations
 
 ### Model / Classifier Improvements
 
