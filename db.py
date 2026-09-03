@@ -16,6 +16,9 @@ def getConnection() -> sqlite3.Connection:
 def initDb():
     connection = getConnection()
     try:
+        # WAL lets readers run concurrently with the single writer, so the
+        # per-conversation write lock does not block graph reads.
+        connection.execute("PRAGMA journal_mode=WAL")
         connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS conversations (
@@ -260,46 +263,59 @@ def saveConceptIds(conversationId: int, turnId: int, conceptIds: list[int]):
         connection.close()
 
 
-def replaceTurnConceptIds(conversationId: int, turnId: int, conceptIds: list[int]):
+def applyReclassification(
+    conversationId: int,
+    edges: list[tuple[int, int, str, float]],
+    turnMetadata: list[tuple[int, bool, int | None, list[int]]],
+) -> None:
+    """Persist a full reanalysis of one conversation in a single transaction.
+
+    Rebuilds the classifier-owned ('auto') edges and every turn's root /
+    timelineParent / concept assignments. Hand-created ('manual') edges are
+    left in place. All-or-nothing: a failure rolls the whole thing back.
+    """
     connection = getConnection()
     try:
         connection.execute(
-            """
-            DELETE FROM turnConcepts
-            WHERE conversationId = ? AND turnId = ?
-            """,
-            (conversationId, turnId),
+            "DELETE FROM semanticEdges WHERE conversationId = ? AND origin = 'auto'",
+            (conversationId,),
         )
-        if conceptIds:
+        if edges:
             connection.executemany(
                 """
-                INSERT INTO turnConcepts (conversationId, turnId, conceptId)
-                VALUES (?, ?, ?)
+                INSERT INTO semanticEdges (conversationId, fromTurnId, toTurnId, label, confidence, origin)
+                VALUES (?, ?, ?, ?, ?, 'auto')
                 """,
-                [(conversationId, turnId, conceptId) for conceptId in conceptIds],
+                [
+                    (conversationId, fromTurnId, toTurnId, label, confidence)
+                    for fromTurnId, toTurnId, label, confidence in edges
+                ],
             )
+        for turnId, root, timelineParent, conceptIds in turnMetadata:
+            connection.execute(
+                """
+                UPDATE turns
+                SET root = ?, timelineParent = ?
+                WHERE conversationId = ? AND turnId = ?
+                """,
+                (int(root), timelineParent, conversationId, turnId),
+            )
+            connection.execute(
+                "DELETE FROM turnConcepts WHERE conversationId = ? AND turnId = ?",
+                (conversationId, turnId),
+            )
+            if conceptIds:
+                connection.executemany(
+                    """
+                    INSERT INTO turnConcepts (conversationId, turnId, conceptId)
+                    VALUES (?, ?, ?)
+                    """,
+                    [(conversationId, turnId, conceptId) for conceptId in conceptIds],
+                )
         connection.commit()
-    finally:
-        connection.close()
-
-
-def updateTurnMetadata(
-    conversationId: int,
-    turnId: int,
-    root: bool,
-    timelineParent: int | None,
-):
-    connection = getConnection()
-    try:
-        connection.execute(
-            """
-            UPDATE turns
-            SET root = ?, timelineParent = ?
-            WHERE conversationId = ? AND turnId = ?
-            """,
-            (int(root), timelineParent, conversationId, turnId),
-        )
-        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
     finally:
         connection.close()
 
@@ -532,27 +548,3 @@ def getEdge(edgeId: int) -> dict | None:
         "origin": str(row["origin"]),
     }
 
-
-def replaceConversationEdges(conversationId: int, edges: list[tuple[int, int, str, float]]):
-    # Only the classifier-owned ('auto') edges are rebuilt here; edges a user
-    # created by hand ('manual') via POST /edges are left untouched.
-    connection = getConnection()
-    try:
-        connection.execute(
-            """
-            DELETE FROM semanticEdges
-            WHERE conversationId = ? AND origin = 'auto'
-            """,
-            (conversationId,),
-        )
-        if edges:
-            connection.executemany(
-                """
-                INSERT INTO semanticEdges (conversationId, fromTurnId, toTurnId, label, confidence, origin)
-                VALUES (?, ?, ?, ?, ?, 'auto')
-                """,
-                [(conversationId, fromTurnId, toTurnId, label, confidence) for fromTurnId, toTurnId, label, confidence in edges],
-            )
-        connection.commit()
-    finally:
-        connection.close()

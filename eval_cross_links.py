@@ -3,7 +3,7 @@ import os
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
-from graphService import addTurn, resetConversation, turns
+from graphService import ConversationGraph, addTurn
 
 
 def olderEdgeSet(turn):
@@ -15,10 +15,10 @@ def olderEdgeSet(turn):
 
 
 def runCase(name, conversation, expectedEdges):
-    resetConversation()
+    graph = ConversationGraph()
     created = []
     for userText, aiText in conversation:
-        created.append(addTurn(userText, aiText))
+        created.append(addTurn(graph, userText, aiText))
 
     targetTurn = created[-1]
     actualEdges = olderEdgeSet(targetTurn)

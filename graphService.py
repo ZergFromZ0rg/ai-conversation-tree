@@ -1,4 +1,4 @@
-import threading
+from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
 from db import getConversationTurns
@@ -14,19 +14,21 @@ crossEncoderModelName = 'cross-encoder/ms-marco-MiniLM-L-6-v2'
 model = SentenceTransformer(biEncoderModelName)
 crossEncoder = CrossEncoder(crossEncoderModelName)
 
-# The turn graph and concept indexes below are module-level mutable state that a
-# single request rebuilds end-to-end (loadConversationState -> addTurn /
-# reclassifyTurns). FastAPI runs the sync route handlers in a threadpool, so
-# concurrent requests would interleave on this shared state. Every code path that
-# reads or mutates it must hold this lock for the whole load-mutate-persist span.
-graphStateLock = threading.RLock()
 
-turns: list[TurnModel] = []
-conceptMembers: dict[int, list[int]] = {}
-conceptEmbeddingSums: dict[int, np.ndarray] = {}
-conceptTurnCounts: dict[int, int] = {}
+@dataclass
+class ConversationGraph:
+    """One conversation's in-memory turn graph and concept indexes.
 
-conceptCounter = 0
+    Every function that reads or mutates this state takes the graph explicitly;
+    there is no module-global graph. Callers that mutate a graph must serialize
+    on the per-conversation lock in graphStore.
+    """
+
+    turns: list[TurnModel] = field(default_factory=list)
+    conceptMembers: dict[int, list[int]] = field(default_factory=dict)
+    conceptEmbeddingSums: dict[int, np.ndarray] = field(default_factory=dict)
+    conceptTurnCounts: dict[int, int] = field(default_factory=dict)
+    conceptCounter: int = 0
 
 THRESHOLD = 0.55
 continuationThreshold = 0.55
@@ -152,8 +154,8 @@ stopwords = {
 
 # Basic text helpers
 
-def nextId():
-    return len(turns)
+def nextId(graph: ConversationGraph) -> int:
+    return len(graph.turns)
 
 
 @lru_cache(maxsize=2048)
@@ -221,10 +223,10 @@ def hasParallelDefinitionCrossLink(similarity: float, features: dict) -> bool:
     )
 
 
-def hasSubthreadTopicContinuation(parentId: int, similarity: float, features: dict) -> bool:
+def hasSubthreadTopicContinuation(graph: ConversationGraph, parentId: int, similarity: float, features: dict) -> bool:
     # A follow-up to a branch node can be a true continuation of that subthread
     # even without generic "how do I" discourse markers.
-    parent = turns[parentId]
+    parent = graph.turns[parentId]
     parentIsBranchTurn = any(label == "branch" for _, label, _ in parent.semanticParents)
     if not parentIsBranchTurn:
         return False
@@ -626,42 +628,42 @@ def strongestEdgeConfidence(confidences: dict) -> float:
 
 # Concept index helpers
 
-def registerTurnInConcepts(turn: TurnModel):
+def registerTurnInConcepts(graph: ConversationGraph, turn: TurnModel):
     # Update the per-concept cache incrementally instead of rebuilding it from all turns.
     for conceptId in turn.conceptIds:
-        conceptMembers.setdefault(conceptId, []).append(turn.id)
-        if conceptId in conceptEmbeddingSums:
-            conceptEmbeddingSums[conceptId] = conceptEmbeddingSums[conceptId] + turn.embedding
-            conceptTurnCounts[conceptId] += 1
+        graph.conceptMembers.setdefault(conceptId, []).append(turn.id)
+        if conceptId in graph.conceptEmbeddingSums:
+            graph.conceptEmbeddingSums[conceptId] = graph.conceptEmbeddingSums[conceptId] + turn.embedding
+            graph.conceptTurnCounts[conceptId] += 1
         else:
-            conceptEmbeddingSums[conceptId] = np.array(turn.embedding, copy=True)
-            conceptTurnCounts[conceptId] = 1
+            graph.conceptEmbeddingSums[conceptId] = np.array(turn.embedding, copy=True)
+            graph.conceptTurnCounts[conceptId] = 1
 
 
-def conceptTurnIds(conceptId: int) -> list[int]:
-    return conceptMembers.get(conceptId, [])
+def conceptTurnIds(graph: ConversationGraph, conceptId: int) -> list[int]:
+    return graph.conceptMembers.get(conceptId, [])
 
 
-def conceptCentroid(conceptId: int):
+def conceptCentroid(graph: ConversationGraph, conceptId: int):
     # The centroid is the running average embedding for one concept.
-    turnCount = conceptTurnCounts.get(conceptId, 0)
+    turnCount = graph.conceptTurnCounts.get(conceptId, 0)
     if turnCount == 0:
         return None
-    return conceptEmbeddingSums[conceptId] / turnCount
+    return graph.conceptEmbeddingSums[conceptId] / turnCount
 
 
-def conceptSimilarityScores(embedding) -> list[tuple[int, float]]:
+def conceptSimilarityScores(graph: ConversationGraph, embedding) -> list[tuple[int, float]]:
     scored = []
-    for conceptId in sorted(conceptTurnCounts):
-        centroid = conceptCentroid(conceptId)
+    for conceptId in sorted(graph.conceptTurnCounts):
+        centroid = conceptCentroid(graph, conceptId)
         score = embeddingSimilarity(embedding, centroid)
         scored.append((conceptId, score))
     return sorted(scored, key=lambda item: item[1], reverse=True)
 
 
-def retrieveCrossLinkCandidates(embedding, timelineParent: int | None) -> list[tuple[int, float]]:
+def retrieveCrossLinkCandidates(graph: ConversationGraph, embedding, timelineParent: int | None) -> list[tuple[int, float]]:
     # Retrieve older candidates in two stages: top concepts first, then top turns inside them.
-    conceptScores = conceptSimilarityScores(embedding)
+    conceptScores = conceptSimilarityScores(graph, embedding)
     if not conceptScores:
         return []
 
@@ -675,15 +677,15 @@ def retrieveCrossLinkCandidates(embedding, timelineParent: int | None) -> list[t
     scoredCandidates = {}
     for conceptId, conceptScore in selectedConcepts:
         memberIds = [
-            turnId for turnId in conceptTurnIds(conceptId)
+            turnId for turnId in conceptTurnIds(graph, conceptId)
             if turnId != timelineParent
         ]
         if not memberIds:
             continue
         conceptTurnScores = []
         for turnId in memberIds:
-            similarity = embeddingSimilarity(embedding, turns[turnId].embedding)
-            agePenalty = olderTurnDecay * max(0, len(turns) - 1 - turnId)
+            similarity = embeddingSimilarity(embedding, graph.turns[turnId].embedding)
+            agePenalty = olderTurnDecay * max(0, len(graph.turns) - 1 - turnId)
             adjustedScore = similarity - agePenalty + 0.15 * conceptScore
             conceptTurnScores.append((turnId, adjustedScore))
 
@@ -739,14 +741,14 @@ def analyzeImmediateRelationship(
     }
 
 
-def classifySemanticCrossLink(parentId: int, userText: str, similarity: float) -> tuple[str, float]:
+def classifySemanticCrossLink(graph: ConversationGraph, parentId: int, userText: str, similarity: float) -> tuple[str, float]:
     # Older links only choose between continuation and related.
-    parent = turns[parentId]
+    parent = graph.turns[parentId]
     features = extractDiscourseFeatures(userText, parent.userText, parent.aiText)
     crossScores = scoreCrossEncoderLabels(parent.userText, parent.aiText, userText)
     labelScores = scoreEdgeLabels(similarity, features)
     hasForwardContinuation = features["forwardScore"] > 0 and hasForwardAnchor(similarity, features)
-    hasSubthreadContinuation = hasSubthreadTopicContinuation(parentId, similarity, features)
+    hasSubthreadContinuation = hasSubthreadTopicContinuation(graph, parentId, similarity, features)
     if hasComparisonFollowup(features) or (
         hasForwardContinuation and labelScores["continuation"] >= labelScores["related"]
     ) or hasSubthreadContinuation:
@@ -764,8 +766,9 @@ def classifySemanticCrossLink(parentId: int, userText: str, similarity: float) -
 
 
 def immediatePreviousTurnClassifier(
-    embedding, 
-    timelineParentId: int, 
+    graph: ConversationGraph,
+    embedding,
+    timelineParentId: int,
     userText: str
 ) -> tuple[int, str, float] | None:
     """
@@ -778,7 +781,7 @@ def immediatePreviousTurnClassifier(
     Returns (parentId, "continuation" | "branch" | "related", confidence) or None.
     """
     # The immediate previous turn gets the full label set and strongest classifier.
-    parent = turns[timelineParentId]
+    parent = graph.turns[timelineParentId]
     
     # Layer 1: Embedding similarity (candidate filter)
     scoreToParent = embeddingSimilarity(embedding, parent.embedding)
@@ -802,16 +805,16 @@ def immediatePreviousTurnClassifier(
     return None
 
 
-def isSemanticAncestor(descendantId: int, ancestorId: int) -> bool:
+def isSemanticAncestor(graph: ConversationGraph, descendantId: int, ancestorId: int) -> bool:
     stack = [descendantId]
     seen = set()
 
     while stack:
         currentId = stack.pop()
-        if currentId in seen or currentId >= len(turns):
+        if currentId in seen or currentId >= len(graph.turns):
             continue
         seen.add(currentId)
-        for parentId, _, _ in turns[currentId].semanticParents:
+        for parentId, _, _ in graph.turns[currentId].semanticParents:
             if parentId == ancestorId:
                 return True
             stack.append(parentId)
@@ -819,7 +822,7 @@ def isSemanticAncestor(descendantId: int, ancestorId: int) -> bool:
     return False
 
 
-def pruneLessSpecificSemanticResults(semanticResults: list[tuple[int, str, float]]) -> list[tuple[int, str, float]]:
+def pruneLessSpecificSemanticResults(graph: ConversationGraph, semanticResults: list[tuple[int, str, float]]) -> list[tuple[int, str, float]]:
     prunedResults: list[tuple[int, str, float]] = []
 
     for result in semanticResults:
@@ -828,7 +831,7 @@ def pruneLessSpecificSemanticResults(semanticResults: list[tuple[int, str, float
         for otherParentId, otherLabel, otherConfidence in semanticResults:
             if otherParentId == parentId:
                 continue
-            if not isSemanticAncestor(otherParentId, parentId):
+            if not isSemanticAncestor(graph, otherParentId, parentId):
                 continue
 
             otherIsMoreSpecific = otherLabel == "continuation" and otherConfidence >= confidence - 0.06
@@ -842,7 +845,7 @@ def pruneLessSpecificSemanticResults(semanticResults: list[tuple[int, str, float
     return prunedResults
 
 
-def findSemanticParents(embedding, timelineParent: int | None, userText: str) -> list[tuple[int, str, float]]:
+def findSemanticParents(graph: ConversationGraph, embedding, timelineParent: int | None, userText: str) -> list[tuple[int, str, float]]:
     """
     Find all turns the new turn should attach to in the graph.
 
@@ -851,14 +854,14 @@ def findSemanticParents(embedding, timelineParent: int | None, userText: str) ->
 
     Returns a list of (turnId, "continuation" | "branch" | "related", confidence) edges.
     """
-    if not turns:
+    if not graph.turns:
         return []
 
     # Step 1 handles the timeline parent; step 2 looks for older semantic cross-links.
-    timelineResult = immediatePreviousTurnClassifier(embedding, timelineParent, userText) if timelineParent is not None else None
+    timelineResult = immediatePreviousTurnClassifier(graph, embedding, timelineParent, userText) if timelineParent is not None else None
 
     # step 2: retrieve candidate concepts, then score only their member turns
-    scored = retrieveCrossLinkCandidates(embedding, timelineParent)
+    scored = retrieveCrossLinkCandidates(graph, embedding, timelineParent)
     if not scored:
         return [timelineResult] if timelineResult is not None else []
 
@@ -869,7 +872,7 @@ def findSemanticParents(embedding, timelineParent: int | None, userText: str) ->
     # Discourse features are reused by the parallel-definition gate and the
     # classification loop below, so compute them once per candidate.
     candidateFeatures = {
-        id: extractDiscourseFeatures(userText, turns[id].userText, turns[id].aiText)
+        id: extractDiscourseFeatures(userText, graph.turns[id].userText, graph.turns[id].aiText)
         for id, _ in scored
     }
 
@@ -884,17 +887,17 @@ def findSemanticParents(embedding, timelineParent: int | None, userText: str) ->
                 break
             crossFeatures = candidateFeatures[id]
             if hasComparisonFollowup(crossFeatures):
-                label, confidence = classifySemanticCrossLink(id, userText, score)
+                label, confidence = classifySemanticCrossLink(graph, id, userText, score)
                 semanticResults.append((id, label, confidence))
             elif hasParallelDefinitionCrossLink(score, crossFeatures):
-                label, confidence = classifySemanticCrossLink(id, userText, score)
+                label, confidence = classifySemanticCrossLink(graph, id, userText, score)
                 semanticResults.append((id, label, confidence))
             elif score >= bestScore - closeGap:
                 # semantically close but not the timeline parent → classify cross-link
-                label, confidence = classifySemanticCrossLink(id, userText, score)
+                label, confidence = classifySemanticCrossLink(graph, id, userText, score)
                 semanticResults.append((id, label, confidence))
 
-    semanticResults = pruneLessSpecificSemanticResults(semanticResults)
+    semanticResults = pruneLessSpecificSemanticResults(graph, semanticResults)
 
     if (
         timelineResult is not None
@@ -907,7 +910,7 @@ def findSemanticParents(embedding, timelineParent: int | None, userText: str) ->
                 result
                 for result in semanticResults
                 if result[1] == "continuation"
-                and isSemanticAncestor(timelineParent, result[0])
+                and isSemanticAncestor(graph, timelineParent, result[0])
                 and result[2] >= timelineConfidence - 0.05
             ),
             None,
@@ -921,15 +924,13 @@ def findSemanticParents(embedding, timelineParent: int | None, userText: str) ->
     return semanticResults
 
 
-def addTurn(userText: str, aiText: str) -> TurnModel:
+def addTurn(graph: ConversationGraph, userText: str, aiText: str) -> TurnModel:
     """
     Create a new turn from a user message and AI response, attach it to the graph,
     and assign it to the appropriate concept(s).
     """
-    global conceptCounter
-
     # the previous turn in the timeline (always the last one added)
-    timelineParent = turns[-1].id if turns else None
+    timelineParent = graph.turns[-1].id if graph.turns else None
 
     # use the new user question to classify its relationship to existing turns
     userEmbedding = encodeText(userText)
@@ -939,28 +940,28 @@ def addTurn(userText: str, aiText: str) -> TurnModel:
     embedding = encodeText(combined)
 
     # find which previous turns this turn relates to, and how
-    semanticParents = findSemanticParents(userEmbedding, timelineParent, userText)
+    semanticParents = findSemanticParents(graph, userEmbedding, timelineParent, userText)
 
     # no semantic parents → this turn starts a new topic
     root = len(semanticParents) == 0
 
     if root:
         # new concept: assign the next available concept id
-        conceptIds = [conceptCounter]
-        conceptCounter += 1
+        conceptIds = [graph.conceptCounter]
+        graph.conceptCounter += 1
     else:
         # inherit concept ids from all semantic parents (deduplicated)
         # if parents span two concepts, this turn belongs to both
         seen = set()
         conceptIds = []
         for parentId, _, _ in semanticParents:
-            for cid in turns[parentId].conceptIds:
+            for cid in graph.turns[parentId].conceptIds:
                 if cid not in seen:
                     seen.add(cid)
                     conceptIds.append(cid)
 
     turn = TurnModel(
-        id=nextId(),
+        id=nextId(graph),
         root=root,
         embedding=embedding,
         userText=userText,
@@ -970,40 +971,38 @@ def addTurn(userText: str, aiText: str) -> TurnModel:
         semanticParents=semanticParents,
         conceptIds=conceptIds,
     )
-    turns.append(turn)
-    registerTurnInConcepts(turn)
+    graph.turns.append(turn)
+    registerTurnInConcepts(graph, turn)
     return turn
 
 
-def resetConversation():
-    global conceptCounter
-
-    turns.clear()
-    conceptMembers.clear()
-    conceptEmbeddingSums.clear()
-    conceptTurnCounts.clear()
-    conceptCounter = 0
+def resetConversation(graph: ConversationGraph) -> None:
+    graph.turns.clear()
+    graph.conceptMembers.clear()
+    graph.conceptEmbeddingSums.clear()
+    graph.conceptTurnCounts.clear()
+    graph.conceptCounter = 0
 
 
-def reclassifyTurns() -> list[TurnModel]:
+def reclassifyTurns(graph: ConversationGraph) -> list[TurnModel]:
     existingTurns = [
         (turn.userText, turn.aiText, turn.timestamp)
-        for turn in turns
+        for turn in graph.turns
     ]
 
-    resetConversation()
+    resetConversation(graph)
 
     rebuiltTurns = []
     for userText, aiText, timestamp in existingTurns:
-        turn = addTurn(userText, aiText)
+        turn = addTurn(graph, userText, aiText)
         turn.timestamp = timestamp
         rebuiltTurns.append(turn)
 
     return rebuiltTurns
 
 
-def loadConversationState(conversationId: int):
-    resetConversation()
+def loadConversationGraph(conversationId: int) -> ConversationGraph:
+    graph = ConversationGraph()
     storedTurns = getConversationTurns(conversationId)
 
     for storedTurn in storedTurns:
@@ -1021,9 +1020,9 @@ def loadConversationState(conversationId: int):
             semanticParents=storedTurn["semanticParents"],
             conceptIds=storedTurn["conceptIds"],
         )
-        turns.append(turn)
-        registerTurnInConcepts(turn)
+        graph.turns.append(turn)
+        registerTurnInConcepts(graph, turn)
 
-    global conceptCounter
-    maxConceptId = max((conceptId for turn in turns for conceptId in turn.conceptIds), default=-1)
-    conceptCounter = maxConceptId + 1
+    maxConceptId = max((conceptId for turn in graph.turns for conceptId in turn.conceptIds), default=-1)
+    graph.conceptCounter = maxConceptId + 1
+    return graph

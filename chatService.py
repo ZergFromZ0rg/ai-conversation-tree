@@ -3,6 +3,7 @@ import os
 import httpx
 
 from db import (
+    applyReclassification,
     createEdge,
     createConversation,
     deleteConversation,
@@ -12,16 +13,14 @@ from db import (
     getEdge,
     listConversations,
     listConversationEdges,
-    replaceConversationEdges,
-    replaceTurnConceptIds,
     saveConceptIds,
     saveSemanticEdges,
     saveTurn,
     saveTurnEmbedding,
-    updateTurnMetadata,
     updateEdge,
 )
-from graphService import addTurn, graphStateLock, loadConversationState, reclassifyTurns
+from graphService import addTurn, reclassifyTurns
+from graphStore import invalidate, lockedGraph
 
 
 def serializeGraphNode(nodeId: int, userText: str, aiText: str, conceptIds: list[int], root: bool, timelineParent: int | None) -> dict:
@@ -215,13 +214,15 @@ def getConversationSession(conversationId: int) -> dict | None:
 
 
 def loadConversationSession(conversationId: int) -> dict:
-    with graphStateLock:
-        loadConversationState(conversationId)
+    # Touch the cache so the graph is warm for the next turn.
+    with lockedGraph(conversationId):
         return buildConversationPayload(conversationId)
 
 
 def deleteConversationSession(conversationId: int) -> bool:
-    return deleteConversation(conversationId)
+    deleted = deleteConversation(conversationId)
+    invalidate(conversationId)
+    return deleted
 
 
 def listConversationTurns(conversationId: int) -> dict:
@@ -239,12 +240,11 @@ def listConversationGraph(conversationId: int) -> dict:
 
 def processChatMessage(conversationId: int, userText: str) -> dict:
     # Generate the AI reply before taking the lock so the (potentially slow) LLM
-    # call does not serialize every other request against the shared turn graph.
+    # call does not serialize other work on this conversation's graph.
     aiText = generateAiText(userText)
 
-    with graphStateLock:
-        loadConversationState(conversationId)
-        turn = addTurn(userText, aiText)
+    with lockedGraph(conversationId) as graph:
+        turn = addTurn(graph, userText, aiText)
         persistGraphTurn(conversationId, turn)
         payload = buildConversationPayload(conversationId)
 
@@ -254,27 +254,21 @@ def processChatMessage(conversationId: int, userText: str) -> dict:
 
 
 def analyzeConversation(conversationId: int) -> dict:
-    with graphStateLock:
-        loadConversationState(conversationId)
-        rebuiltTurns = reclassifyTurns()
+    with lockedGraph(conversationId) as graph:
+        rebuiltTurns = reclassifyTurns(graph)
 
-        replaceConversationEdges(
+        applyReclassification(
             conversationId,
             [
                 (parentId, turn.id, label, confidence)
                 for turn in rebuiltTurns
                 for parentId, label, confidence in turn.semanticParents
             ],
+            [
+                (turn.id, turn.root, turn.timelineParent, turn.conceptIds)
+                for turn in rebuiltTurns
+            ],
         )
-
-        for turn in rebuiltTurns:
-            updateTurnMetadata(
-                conversationId=conversationId,
-                turnId=turn.id,
-                root=turn.root,
-                timelineParent=turn.timelineParent,
-            )
-            replaceTurnConceptIds(conversationId, turn.id, turn.conceptIds)
 
         payload = buildConversationPayload(conversationId)
     return {
@@ -286,15 +280,24 @@ def analyzeConversation(conversationId: int) -> dict:
 
 
 def createConversationEdge(conversationId: int, fromTurnId: int, toTurnId: int, label: str, confidence: float) -> dict:
-    return createEdge(conversationId, fromTurnId, toTurnId, label, confidence)
+    edge = createEdge(conversationId, fromTurnId, toTurnId, label, confidence)
+    invalidate(conversationId)
+    return edge
 
 
 def patchConversationEdge(edgeId: int, label: str | None = None, confidence: float | None = None) -> dict | None:
-    return updateEdge(edgeId, label=label, confidence=confidence)
+    edge = updateEdge(edgeId, label=label, confidence=confidence)
+    if edge is not None:
+        invalidate(edge["conversationId"])
+    return edge
 
 
 def removeConversationEdge(edgeId: int) -> bool:
-    return deleteEdge(edgeId)
+    edge = getEdge(edgeId)
+    deleted = deleteEdge(edgeId)
+    if deleted and edge is not None:
+        invalidate(edge["conversationId"])
+    return deleted
 
 
 def getConversationEdge(edgeId: int) -> dict | None:
