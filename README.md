@@ -2,14 +2,14 @@
 
 `AI Conversation Tree` is a local-first proof of concept for analyzing chat structure.
 
-It takes a sequence of user/assistant turns, classifies how each new turn relates to earlier turns, stores the result, and renders the conversation as a graph.
+It takes a sequence of user/assistant turns, classifies how each new turn relates to earlier turns, stores the result, and renders the conversation both as a normal chat and as a graph.
 
 Current goals:
 
 - validate graph logic
 - persist conversations locally
 - test with local models through `Ollama`
-- provide a simple graph viewer for inspection
+- provide a chat-first viewer with a graph drawer for inspection
 
 This is not intended to be production-ready. It is intended to be technically solid, explainable, and useful as a portfolio project.
 
@@ -30,7 +30,7 @@ The result is stored as:
 - concept assignments
 - embeddings
 
-and rendered as a graph.
+and rendered as a chat with a graph drawer.
 
 ## Core Approach
 
@@ -72,6 +72,8 @@ Discourse features are used as supporting evidence, not as ground truth. This re
 
 ## Tech Stack
 
+Backend:
+
 - `Python`
 - `FastAPI`
 - `SQLite`
@@ -80,37 +82,58 @@ Discourse features are used as supporting evidence, not as ground truth. This re
 - `sentence-transformers`
 - `CrossEncoder`
 - `PyTorch`
-- `React Flow`
 - `Ollama` for local response generation
 
+Frontend:
+
+- `React` + `Vite`
+- `React Flow` for the graph canvas
+- `Dagre` for hierarchical graph layout
+
 ## Project Structure
+
+Backend:
 
 - `api.py`
   - HTTP routes
 - `chatService.py`
   - orchestration, provider calls, graph payload serialization
 - `graphService.py`
-  - classification logic, concept retrieval, reanalysis
+  - `ConversationGraph` model, classification logic, concept retrieval, reanalysis
+- `graphStore.py`
+  - per-conversation graph cache (LRU) and per-conversation write lock
 - `db.py`
   - `SQLite` schema and helpers
 - `models.py`
   - application data models
-- `frontend/`
-  - minimal graph viewer
+
+Frontend (`frontend/src/`):
+
+- `App.jsx`
+  - shell: conversation state, layout
+- `api.js`
+  - fetch wrappers
+- `useConversation.js`
+  - hook owning one conversation's turns + graph and the send / analyze / refresh actions
+- `components/`
+  - `ConversationSidebar`, `ChatTranscript`, `Composer`, `GraphRail`, `GraphDrawer`, `TurnGraph`
 
 ## Persistence Model
 
-`SQLite` stores:
+`SQLite` (WAL mode) stores:
 
 - `conversations`
 - `turns`
-- `semanticEdges`
+- `semanticEdges` — each edge carries an `origin` of `auto` (classifier) or `manual` (hand-created via `POST /edges`)
 - `turnConcepts`
 - `turnEmbeddings`
 
 Embeddings are currently stored as JSON for simplicity.
 
-When a conversation is loaded, the backend rebuilds the in-memory graph state from persisted rows.
+The first request for a conversation rebuilds its in-memory `ConversationGraph`
+from persisted rows; `graphStore` then keeps it cached so subsequent turns do
+not re-read the whole history. This assumes a single backend process (one
+`uvicorn` worker).
 
 ## API
 
@@ -128,7 +151,9 @@ When a conversation is loaded, the backend rebuilds the in-memory graph state fr
 
 ### Graph Endpoints
 
-- `POST /conversations/{conversationId}/analyze`
+- `POST /conversations/{conversationId}/analyze` — recomputes the classifier
+  (`auto`) edges and every turn's root / concept assignments in a single
+  transaction; `manual` edges are left in place
 - `GET /conversations/{conversationId}/graph`
 
 ### Edge Correction Endpoints
@@ -182,6 +207,23 @@ Semantics:
 - orange edge = `branch`
 - blue bidirectional edge = `related`
 - orange node border = `root`
+
+## Interface
+
+The viewer at `/ui` is a normal chat: a conversation list on the left, the
+transcript in the middle, a composer at the bottom.
+
+The graph lives in a drawer on the right:
+
+- a pill on the right edge shows the turn count; click it (or press
+  `Cmd/Ctrl+G`) to slide the graph drawer open
+- the graph is laid out top-to-bottom by `Dagre` along the primary-parent spine;
+  branch and related links are drawn as secondary curves
+- clicking a graph node scrolls the transcript to that turn and highlights it
+- the drawer header has `Refresh` and `Reanalyze`
+
+The UI follows the browser's light/dark preference. It does not stream replies
+token by token yet.
 
 ## Local Setup
 
@@ -239,18 +281,26 @@ venv/bin/python -m uvicorn api:app --reload
 Open:
 
 - API: `http://127.0.0.1:8000`
-- Viewer: `http://127.0.0.1:8000/ui`
+- Viewer: `http://127.0.0.1:8000/ui` (served from `frontend/dist`)
+
+For frontend development, run the backend on `:8000` and Vite separately:
+
+```bash
+cd frontend
+npm run dev   # http://127.0.0.1:5173, proxies /conversations and /edges to :8000
+```
 
 ## Local Workflow
 
 Typical workflow:
 
-1. create a conversation
+1. start a new chat
 2. send turns through the UI or API
-3. inspect the graph
-4. re-run `Analyze` after logic changes
+3. open the graph drawer to see how the turns relate
+4. hit `Reanalyze` after changing classifier logic
 
-The UI is intentionally minimal. It is for inspecting graph behavior, not for polished chat UX.
+The viewer is for inspecting graph behavior; it is a real chat interface but a
+local, single-user one, not a hosted product.
 
 ## Example Requests
 
@@ -303,13 +353,19 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 venv/bin/python eval_immediate_previous.
 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 venv/bin/python eval_cross_links.py
 ```
 
+Frontend build:
+
+```bash
+cd frontend && npm run build
+```
+
 ## Current Limitations
 
 - older-turn retrieval still depends on centroid-first heuristics
 - embeddings are stored as JSON, not a native vector type
 - local `Ollama` latency depends heavily on hardware and model size
-- UI is an inspection tool, not a complete chat product
-- graph layout is heuristic, not a full semantic DAG layout engine
+- the in-memory graph cache assumes a single backend process (one `uvicorn` worker)
+- replies are not streamed token by token
 - no auth, multi-user isolation, or production deployment concerns are addressed
 
 ## Future Work
@@ -384,11 +440,10 @@ Planned work:
 
 Planned work:
 
-- better graph legend and filtering
-- node focus / centering and subgraph inspection
-- cleaner tree layout for dense graphs
-- chat-first viewer with graph drawer
-- correction tooling for manually editing edges
+- stream assistant replies token by token
+- auto-title conversations from the first message; conversation rename
+- edge-correction tooling in the drawer (create / relabel / delete edges)
+- graph filtering by edge type and subgraph focus
 
 ## Notes
 
