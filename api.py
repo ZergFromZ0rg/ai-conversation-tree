@@ -40,9 +40,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-if frontendDistDir.exists():
-    app.mount("/assets", StaticFiles(directory=frontendDistDir / "assets"), name="assets")
-    app.mount("/ui/assets", StaticFiles(directory=frontendDistDir / "assets"), name="ui-assets")
+frontendAssetsDir = frontendDistDir / "assets"
+if frontendAssetsDir.is_dir():
+    # The built index.html references assets with absolute /assets/... URLs.
+    app.mount("/assets", StaticFiles(directory=frontendAssetsDir), name="assets")
 
 
 class CreateConversationRequest(BaseModel):

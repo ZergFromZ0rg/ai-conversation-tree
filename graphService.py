@@ -866,19 +866,23 @@ def findSemanticParents(embedding, timelineParent: int | None, userText: str) ->
     semanticResults = []
     hasComparisonQuestion = countPatternMatches(userText.lower(), comparisonPatterns) > 0
 
+    # Discourse features are reused by the parallel-definition gate and the
+    # classification loop below, so compute them once per candidate.
+    candidateFeatures = {
+        id: extractDiscourseFeatures(userText, turns[id].userText, turns[id].aiText)
+        for id, _ in scored
+    }
+
     hasParallelDefinitionCandidate = any(
-        hasParallelDefinitionCrossLink(
-            score,
-            extractDiscourseFeatures(userText, turns[id].userText, turns[id].aiText),
-        )
-        for id, score in scored[:maxOlderCandidates]
+        hasParallelDefinitionCrossLink(score, candidateFeatures[id])
+        for id, score in scored
     )
 
     if bestScore >= THRESHOLD or hasComparisonQuestion or hasParallelDefinitionCandidate:
         for id, score in scored:
             if len(semanticResults) >= maxParents:
                 break
-            crossFeatures = extractDiscourseFeatures(userText, turns[id].userText, turns[id].aiText)
+            crossFeatures = candidateFeatures[id]
             if hasComparisonFollowup(crossFeatures):
                 label, confidence = classifySemanticCrossLink(id, userText, score)
                 semanticResults.append((id, label, confidence))

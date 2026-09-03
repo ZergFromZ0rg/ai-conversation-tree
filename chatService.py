@@ -93,7 +93,7 @@ def extractResponseText(responseBody: dict) -> str:
 
 
 def extractOllamaText(responseBody: dict) -> str:
-    message = responseBody.get("message", {})
+    message = responseBody.get("message") or {}
     content = message.get("content", "")
     if isinstance(content, str):
         return content.strip()
@@ -158,9 +158,8 @@ def generateAiText(userText: str) -> str:
     return aiText
 
 
-def buildConversationPayload(conversationId: int) -> dict:
-    storedTurns = getConversationTurns(conversationId)
-    responseTurns = [
+def serializeStoredTurns(storedTurns: list[dict]) -> list[dict]:
+    return [
         {
             "id": turn["id"],
             "conversationId": turn["conversationId"],
@@ -174,10 +173,14 @@ def buildConversationPayload(conversationId: int) -> dict:
         }
         for turn in storedTurns
     ]
+
+
+def buildConversationPayload(conversationId: int) -> dict:
+    storedTurns = getConversationTurns(conversationId)
     graph = buildGraphPayloadFromStoredTurns(conversationId, storedTurns)
     return {
         "conversationId": conversationId,
-        "turns": responseTurns,
+        "turns": serializeStoredTurns(storedTurns),
         "nodes": graph["nodes"],
         "edges": graph["edges"],
     }
@@ -222,7 +225,10 @@ def deleteConversationSession(conversationId: int) -> bool:
 
 
 def listConversationTurns(conversationId: int) -> dict:
-    return {"conversationId": conversationId, "turns": buildConversationPayload(conversationId)["turns"]}
+    return {
+        "conversationId": conversationId,
+        "turns": serializeStoredTurns(getConversationTurns(conversationId)),
+    }
 
 
 def listConversationGraph(conversationId: int) -> dict:
