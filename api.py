@@ -8,7 +8,6 @@ from pydantic import BaseModel, Field
 
 from chatService import (
     analyzeConversation,
-    buildInMemoryGraphPayload,
     createConversationEdge,
     createConversationSession,
     deleteConversationSession,
@@ -20,8 +19,10 @@ from chatService import (
     processChatMessage,
     removeConversationEdge,
 )
-from db import initDb
+from db import getConversationTurnIds, initDb
 from graphService import analyzeImmediateRelationship
+
+EDGE_LABELS = ("continuation", "branch", "related")
 
 
 app = FastAPI()
@@ -76,7 +77,6 @@ def root():
     return {
         "message": "AI Conversation Tree API",
         "endpoints": [
-            "GET /graph",
             "GET /ui",
             "POST /conversations",
             "GET /conversations",
@@ -166,15 +166,25 @@ def getGraph(conversationId: int):
     return listConversationGraph(conversationId)
 
 
-@app.get("/graph")
-def getCurrentGraph():
-    return buildInMemoryGraphPayload()
-
-
 @app.post("/edges", status_code=status.HTTP_201_CREATED)
 def createEdge(req: CreateEdgeRequest):
     if getConversationSession(req.conversationId) is None:
         raise HTTPException(status_code=404, detail="Conversation not found.")
+    if req.label not in EDGE_LABELS:
+        raise HTTPException(status_code=422, detail=f"label must be one of {list(EDGE_LABELS)}.")
+    if not 0.0 <= req.confidence <= 1.0:
+        raise HTTPException(status_code=422, detail="confidence must be between 0.0 and 1.0.")
+    if req.fromTurnId == req.toTurnId:
+        raise HTTPException(status_code=422, detail="fromTurnId and toTurnId must differ.")
+    if req.fromTurnId > req.toTurnId:
+        raise HTTPException(
+            status_code=422,
+            detail="fromTurnId must be earlier than toTurnId; edges point from the earlier turn to the later turn.",
+        )
+    turnIds = set(getConversationTurnIds(req.conversationId))
+    missing = [turnId for turnId in (req.fromTurnId, req.toTurnId) if turnId not in turnIds]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Turns not found in conversation: {missing}.")
     return createConversationEdge(
         conversationId=req.conversationId,
         fromTurnId=req.fromTurnId,
@@ -186,6 +196,10 @@ def createEdge(req: CreateEdgeRequest):
 
 @app.patch("/edges/{edgeId}")
 def updateEdge(edgeId: int, req: UpdateEdgeRequest):
+    if req.label is not None and req.label not in EDGE_LABELS:
+        raise HTTPException(status_code=422, detail=f"label must be one of {list(EDGE_LABELS)}.")
+    if req.confidence is not None and not 0.0 <= req.confidence <= 1.0:
+        raise HTTPException(status_code=422, detail="confidence must be between 0.0 and 1.0.")
     edge = patchConversationEdge(edgeId, label=req.label, confidence=req.confidence)
     if edge is None:
         raise HTTPException(status_code=404, detail="Edge not found.")

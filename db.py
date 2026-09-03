@@ -45,6 +45,7 @@ def initDb():
                 toTurnId INTEGER NOT NULL,
                 label TEXT NOT NULL,
                 confidence REAL NOT NULL,
+                origin TEXT NOT NULL DEFAULT 'auto',
                 FOREIGN KEY (conversationId) REFERENCES conversations(id) ON DELETE CASCADE
             );
 
@@ -75,6 +76,17 @@ def initDb():
             ON turnConcepts(turnId);
             """
         )
+
+        # Migrate databases created before semanticEdges.origin existed.
+        existingColumns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(semanticEdges)").fetchall()
+        }
+        if "origin" not in existingColumns:
+            connection.execute(
+                "ALTER TABLE semanticEdges ADD COLUMN origin TEXT NOT NULL DEFAULT 'auto'"
+            )
+
         connection.commit()
     finally:
         connection.close()
@@ -220,8 +232,8 @@ def saveSemanticEdges(conversationId: int, toTurnId: int, semanticParents: list[
     try:
         connection.executemany(
             """
-            INSERT INTO semanticEdges (conversationId, fromTurnId, toTurnId, label, confidence)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO semanticEdges (conversationId, fromTurnId, toTurnId, label, confidence, origin)
+            VALUES (?, ?, ?, ?, ?, 'auto')
             """,
             [
                 (conversationId, fromTurnId, toTurnId, label, confidence)
@@ -374,12 +386,30 @@ def getConversationTurns(conversationId: int) -> list[dict]:
     return turns
 
 
+def getConversationTurnIds(conversationId: int) -> list[int]:
+    connection = getConnection()
+    try:
+        rows = connection.execute(
+            """
+            SELECT turnId
+            FROM turns
+            WHERE conversationId = ?
+            ORDER BY turnId ASC
+            """,
+            (conversationId,),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    return [int(row["turnId"]) for row in rows]
+
+
 def listConversationEdges(conversationId: int) -> list[dict]:
     connection = getConnection()
     try:
         rows = connection.execute(
             """
-            SELECT id, conversationId, fromTurnId, toTurnId, label, confidence
+            SELECT id, conversationId, fromTurnId, toTurnId, label, confidence, origin
             FROM semanticEdges
             WHERE conversationId = ?
             ORDER BY toTurnId ASC, id ASC
@@ -397,6 +427,7 @@ def listConversationEdges(conversationId: int) -> list[dict]:
             "toTurnId": int(row["toTurnId"]),
             "label": str(row["label"]),
             "confidence": float(row["confidence"]),
+            "origin": str(row["origin"]),
         }
         for row in rows
     ]
@@ -407,8 +438,8 @@ def createEdge(conversationId: int, fromTurnId: int, toTurnId: int, label: str, 
     try:
         cursor = connection.execute(
             """
-            INSERT INTO semanticEdges (conversationId, fromTurnId, toTurnId, label, confidence)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO semanticEdges (conversationId, fromTurnId, toTurnId, label, confidence, origin)
+            VALUES (?, ?, ?, ?, ?, 'manual')
             """,
             (conversationId, fromTurnId, toTurnId, label, confidence),
         )
@@ -424,6 +455,7 @@ def createEdge(conversationId: int, fromTurnId: int, toTurnId: int, label: str, 
         "toTurnId": toTurnId,
         "label": label,
         "confidence": confidence,
+        "origin": "manual",
     }
 
 
@@ -478,7 +510,7 @@ def getEdge(edgeId: int) -> dict | None:
     try:
         row = connection.execute(
             """
-            SELECT id, conversationId, fromTurnId, toTurnId, label, confidence
+            SELECT id, conversationId, fromTurnId, toTurnId, label, confidence, origin
             FROM semanticEdges
             WHERE id = ?
             """,
@@ -497,24 +529,27 @@ def getEdge(edgeId: int) -> dict | None:
         "toTurnId": int(row["toTurnId"]),
         "label": str(row["label"]),
         "confidence": float(row["confidence"]),
+        "origin": str(row["origin"]),
     }
 
 
 def replaceConversationEdges(conversationId: int, edges: list[tuple[int, int, str, float]]):
+    # Only the classifier-owned ('auto') edges are rebuilt here; edges a user
+    # created by hand ('manual') via POST /edges are left untouched.
     connection = getConnection()
     try:
         connection.execute(
             """
             DELETE FROM semanticEdges
-            WHERE conversationId = ?
+            WHERE conversationId = ? AND origin = 'auto'
             """,
             (conversationId,),
         )
         if edges:
             connection.executemany(
                 """
-                INSERT INTO semanticEdges (conversationId, fromTurnId, toTurnId, label, confidence)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO semanticEdges (conversationId, fromTurnId, toTurnId, label, confidence, origin)
+                VALUES (?, ?, ?, ?, ?, 'auto')
                 """,
                 [(conversationId, fromTurnId, toTurnId, label, confidence) for fromTurnId, toTurnId, label, confidence in edges],
             )

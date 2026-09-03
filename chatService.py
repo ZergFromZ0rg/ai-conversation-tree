@@ -21,7 +21,7 @@ from db import (
     updateTurnMetadata,
     updateEdge,
 )
-from graphService import addTurn, loadConversationState, reclassifyTurns
+from graphService import addTurn, graphStateLock, loadConversationState, reclassifyTurns
 
 
 def serializeGraphNode(nodeId: int, userText: str, aiText: str, conceptIds: list[int], root: bool, timelineParent: int | None) -> dict:
@@ -35,13 +35,14 @@ def serializeGraphNode(nodeId: int, userText: str, aiText: str, conceptIds: list
     }
 
 
-def serializeGraphEdge(edgeId: int | None, fromTurnId: int, toTurnId: int, label: str, confidence: float) -> dict:
+def serializeGraphEdge(edgeId: int | None, fromTurnId: int, toTurnId: int, label: str, confidence: float, origin: str = "auto") -> dict:
     return {
         "id": int(edgeId) if edgeId is not None else None,
         "fromTurnId": int(fromTurnId),
         "toTurnId": int(toTurnId),
         "label": str(label),
         "confidence": float(confidence),
+        "origin": str(origin),
     }
 
 
@@ -65,48 +66,13 @@ def buildGraphPayloadFromStoredTurns(conversationId: int, storedTurns: list[dict
             toTurnId=edge["toTurnId"],
             label=edge["label"],
             confidence=edge["confidence"],
+            origin=edge.get("origin", "auto"),
         )
         for edge in sorted(
             listConversationEdges(conversationId),
             key=lambda edge: (int(edge["toTurnId"]), int(edge["fromTurnId"]), int(edge["id"]))
         )
     ]
-
-    return {
-        "nodes": nodes,
-        "edges": edges,
-    }
-
-
-def buildInMemoryGraphPayload() -> dict:
-    from graphService import turns
-
-    nodes = [
-        serializeGraphNode(
-            nodeId=turn.id,
-            userText=turn.userText,
-            aiText=turn.aiText,
-            conceptIds=turn.conceptIds,
-            root=turn.root,
-            timelineParent=turn.timelineParent,
-        )
-        for turn in sorted(turns, key=lambda turn: int(turn.id))
-    ]
-
-    edges = []
-    syntheticEdgeId = 0
-    for turn in sorted(turns, key=lambda turn: int(turn.id)):
-        for parentId, label, confidence in sorted(turn.semanticParents, key=lambda parent: (int(parent[0]), str(parent[1]), float(parent[2]))):
-            edges.append(
-                serializeGraphEdge(
-                    edgeId=syntheticEdgeId,
-                    fromTurnId=parentId,
-                    toTurnId=turn.id,
-                    label=label,
-                    confidence=confidence,
-                )
-            )
-            syntheticEdgeId += 1
 
     return {
         "nodes": nodes,
@@ -246,8 +212,9 @@ def getConversationSession(conversationId: int) -> dict | None:
 
 
 def loadConversationSession(conversationId: int) -> dict:
-    loadConversationState(conversationId)
-    return buildConversationPayload(conversationId)
+    with graphStateLock:
+        loadConversationState(conversationId)
+        return buildConversationPayload(conversationId)
 
 
 def deleteConversationSession(conversationId: int) -> bool:
@@ -265,41 +232,45 @@ def listConversationGraph(conversationId: int) -> dict:
 
 
 def processChatMessage(conversationId: int, userText: str) -> dict:
-    loadConversationState(conversationId)
+    # Generate the AI reply before taking the lock so the (potentially slow) LLM
+    # call does not serialize every other request against the shared turn graph.
     aiText = generateAiText(userText)
-    turn = addTurn(userText, aiText)
 
-    persistGraphTurn(conversationId, turn)
+    with graphStateLock:
+        loadConversationState(conversationId)
+        turn = addTurn(userText, aiText)
+        persistGraphTurn(conversationId, turn)
+        payload = buildConversationPayload(conversationId)
 
-    payload = buildConversationPayload(conversationId)
     payload["turnId"] = turn.id
     payload["aiText"] = turn.aiText
     return payload
 
 
 def analyzeConversation(conversationId: int) -> dict:
-    loadConversationState(conversationId)
-    rebuiltTurns = reclassifyTurns()
+    with graphStateLock:
+        loadConversationState(conversationId)
+        rebuiltTurns = reclassifyTurns()
 
-    replaceConversationEdges(
-        conversationId,
-        [
-            (parentId, turn.id, label, confidence)
-            for turn in rebuiltTurns
-            for parentId, label, confidence in turn.semanticParents
-        ],
-    )
-
-    for turn in rebuiltTurns:
-        updateTurnMetadata(
-            conversationId=conversationId,
-            turnId=turn.id,
-            root=turn.root,
-            timelineParent=turn.timelineParent,
+        replaceConversationEdges(
+            conversationId,
+            [
+                (parentId, turn.id, label, confidence)
+                for turn in rebuiltTurns
+                for parentId, label, confidence in turn.semanticParents
+            ],
         )
-        replaceTurnConceptIds(conversationId, turn.id, turn.conceptIds)
 
-    payload = buildConversationPayload(conversationId)
+        for turn in rebuiltTurns:
+            updateTurnMetadata(
+                conversationId=conversationId,
+                turnId=turn.id,
+                root=turn.root,
+                timelineParent=turn.timelineParent,
+            )
+            replaceTurnConceptIds(conversationId, turn.id, turn.conceptIds)
+
+        payload = buildConversationPayload(conversationId)
     return {
         "conversationId": conversationId,
         "turnCount": len(payload["turns"]),

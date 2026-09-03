@@ -1,3 +1,4 @@
+import threading
 from datetime import datetime
 from functools import lru_cache
 from db import getConversationTurns
@@ -12,6 +13,14 @@ crossEncoderModelName = 'cross-encoder/ms-marco-MiniLM-L-6-v2'
 
 model = SentenceTransformer(biEncoderModelName)
 crossEncoder = CrossEncoder(crossEncoderModelName)
+
+# The turn graph and concept indexes below are module-level mutable state that a
+# single request rebuilds end-to-end (loadConversationState -> addTurn /
+# reclassifyTurns). FastAPI runs the sync route handlers in a threadpool, so
+# concurrent requests would interleave on this shared state. Every code path that
+# reads or mutates it must hold this lock for the whole load-mutate-persist span.
+graphStateLock = threading.RLock()
+
 turns: list[TurnModel] = []
 conceptMembers: dict[int, list[int]] = {}
 conceptEmbeddingSums: dict[int, np.ndarray] = {}

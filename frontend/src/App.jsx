@@ -93,6 +93,7 @@ function buildFlowLayout(nodes, edges) {
   const rootGapUnits = 1.4;
   const positions = new Map();
   const extentsByNode = new Map();
+  const extentsInProgress = new Set();
 
   function splitChildren(children) {
     const continuationChildren = children.filter((child) => child.relation === "continuation");
@@ -127,6 +128,12 @@ function buildFlowLayout(nodes, edges) {
     if (extentsByNode.has(nodeId)) {
       return extentsByNode.get(nodeId);
     }
+    // Break cycles: edges created through the API can form a loop (self-edge or
+    // back-edge), which would otherwise recurse until the stack overflows.
+    if (extentsInProgress.has(nodeId)) {
+      return { left: 0.55, right: 0.55 };
+    }
+    extentsInProgress.add(nodeId);
 
     const children = childrenByParent.get(nodeId) ?? [];
     const { trunkChild, leftChildren, rightChildren } = splitChildren(children);
@@ -159,6 +166,7 @@ function buildFlowLayout(nodes, edges) {
 
     const extents = { left: leftExtent, right: rightExtent };
     extentsByNode.set(nodeId, extents);
+    extentsInProgress.delete(nodeId);
     return extents;
   }
 

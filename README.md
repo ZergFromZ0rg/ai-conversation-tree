@@ -130,13 +130,18 @@ When a conversation is loaded, the backend rebuilds the in-memory graph state fr
 
 - `POST /conversations/{conversationId}/analyze`
 - `GET /conversations/{conversationId}/graph`
-- `GET /graph`
 
 ### Edge Correction Endpoints
 
 - `POST /edges`
 - `PATCH /edges/{edgeId}`
 - `DELETE /edges/{edgeId}`
+
+`POST /edges` validates that both turns exist in the conversation, that
+`fromTurnId` is earlier than `toTurnId`, that `label` is one of
+`continuation` / `branch` / `related`, and that `confidence` is in `[0, 1]`.
+Hand-created edges are marked `origin: "manual"` and are preserved when a
+conversation is re-analyzed; classifier edges (`origin: "auto"`) are rebuilt.
 
 ### Debug Endpoint
 
@@ -164,7 +169,8 @@ Graph endpoints return stable JSON:
       "fromTurnId": 0,
       "toTurnId": 1,
       "label": "related",
-      "confidence": 0.696
+      "confidence": 0.696,
+      "origin": "auto"
     }
   ]
 }
