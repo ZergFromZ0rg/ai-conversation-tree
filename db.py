@@ -71,6 +71,24 @@ def initDb():
                 UNIQUE (conversationId, turnId)
             );
 
+            -- Similarity links between two concepts in different conversations.
+            -- The pair is stored once, canonically ordered so that
+            -- (aConversationId, aConceptId) < (bConversationId, bConceptId).
+            CREATE TABLE IF NOT EXISTS conceptLinks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                aConversationId INTEGER NOT NULL,
+                aConceptId INTEGER NOT NULL,
+                bConversationId INTEGER NOT NULL,
+                bConceptId INTEGER NOT NULL,
+                score REAL NOT NULL,
+                label TEXT NOT NULL,
+                origin TEXT NOT NULL DEFAULT 'auto',
+                updatedAt TEXT NOT NULL,
+                FOREIGN KEY (aConversationId) REFERENCES conversations(id) ON DELETE CASCADE,
+                FOREIGN KEY (bConversationId) REFERENCES conversations(id) ON DELETE CASCADE,
+                UNIQUE (aConversationId, aConceptId, bConversationId, bConceptId)
+            );
+
             CREATE INDEX IF NOT EXISTS idxTurnsConversationId
             ON turns(conversationId);
 
@@ -79,6 +97,12 @@ def initDb():
 
             CREATE INDEX IF NOT EXISTS idxTurnConceptsTurnId
             ON turnConcepts(turnId);
+
+            CREATE INDEX IF NOT EXISTS idxConceptLinksA
+            ON conceptLinks(aConversationId);
+
+            CREATE INDEX IF NOT EXISTS idxConceptLinksB
+            ON conceptLinks(bConversationId);
             """
         )
 
@@ -617,4 +641,118 @@ def getEdge(edgeId: int) -> dict | None:
         "confidence": float(row["confidence"]),
         "origin": str(row["origin"]),
     }
+
+
+def canonicalConceptPair(
+    conv1: int, concept1: int, conv2: int, concept2: int
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    """Order a concept pair so the smaller (conversationId, conceptId) comes first.
+
+    conceptLinks stores each unordered pair once; every writer and reader uses
+    this ordering so the UNIQUE constraint sees a single canonical row.
+    """
+    left = (int(conv1), int(concept1))
+    right = (int(conv2), int(concept2))
+    return (left, right) if left <= right else (right, left)
+
+
+def _conceptLinkRow(row: sqlite3.Row) -> dict:
+    return {
+        "id": int(row["id"]),
+        "aConversationId": int(row["aConversationId"]),
+        "aConceptId": int(row["aConceptId"]),
+        "bConversationId": int(row["bConversationId"]),
+        "bConceptId": int(row["bConceptId"]),
+        "score": float(row["score"]),
+        "label": str(row["label"]),
+        "origin": str(row["origin"]),
+        "updatedAt": str(row["updatedAt"]),
+    }
+
+
+def replaceAutoConceptLinks(
+    conversationId: int,
+    links: list[tuple[int, int, int, int, float, str]],
+) -> None:
+    """Rebuild the 'auto' concept links that touch one conversation.
+
+    `links` entries are (conv1, concept1, conv2, concept2, score, label) in any
+    order; they are canonicalised here. Links between two concepts of the same
+    conversation are dropped. Hand-created ('manual') links are left untouched:
+    the delete is scoped to origin='auto', and an insert that would collide with
+    a manual row is ignored. All-or-nothing.
+    """
+    rows = []
+    for conv1, concept1, conv2, concept2, score, label in links:
+        if int(conv1) == int(conv2):
+            continue
+        (aConv, aConcept), (bConv, bConcept) = canonicalConceptPair(
+            conv1, concept1, conv2, concept2
+        )
+        rows.append((aConv, aConcept, bConv, bConcept, float(score), str(label)))
+
+    connection = getConnection()
+    try:
+        connection.execute(
+            """
+            DELETE FROM conceptLinks
+            WHERE origin = 'auto'
+              AND (aConversationId = ? OR bConversationId = ?)
+            """,
+            (conversationId, conversationId),
+        )
+        if rows:
+            connection.executemany(
+                """
+                INSERT INTO conceptLinks
+                    (aConversationId, aConceptId, bConversationId, bConceptId,
+                     score, label, origin, updatedAt)
+                VALUES (?, ?, ?, ?, ?, ?, 'auto', datetime('now'))
+                ON CONFLICT (aConversationId, aConceptId, bConversationId, bConceptId)
+                DO NOTHING
+                """,
+                rows,
+            )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def listConceptLinksForConversation(conversationId: int) -> list[dict]:
+    connection = getConnection()
+    try:
+        rows = connection.execute(
+            """
+            SELECT id, aConversationId, aConceptId, bConversationId, bConceptId,
+                   score, label, origin, updatedAt
+            FROM conceptLinks
+            WHERE aConversationId = ? OR bConversationId = ?
+            ORDER BY score DESC, id ASC
+            """,
+            (conversationId, conversationId),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    return [_conceptLinkRow(row) for row in rows]
+
+
+def listAllConceptLinks() -> list[dict]:
+    connection = getConnection()
+    try:
+        rows = connection.execute(
+            """
+            SELECT id, aConversationId, aConceptId, bConversationId, bConceptId,
+                   score, label, origin, updatedAt
+            FROM conceptLinks
+            ORDER BY score DESC, id ASC
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+
+    return [_conceptLinkRow(row) for row in rows]
 
