@@ -2,11 +2,13 @@ import os
 
 from chatService import createConversationSession, loadConversationSession, processChatMessage
 from db import initDb
+from vectorStore import initVectorStore
 
 
 def main():
     os.environ.setdefault("AI_CONVERSATION_TREE_STUB_LLM", "1")
     initDb()
+    initVectorStore()
 
     conversationPayload = createConversationSession("SQLite milestone test")
     conversationId = conversationPayload["conversationId"]

@@ -19,14 +19,17 @@ from chatService import (
     processChatMessage,
     removeConversationEdge,
 )
-from db import getConversationTurnIds, initDb
+from db import getConversationTurnIds, initDb, seedVectorStore
 from graphService import analyzeImmediateRelationship
+from vectorStore import initVectorStore
 
 EDGE_LABELS = ("continuation", "branch", "related")
 
 
 app = FastAPI()
 initDb()
+initVectorStore()
+seedVectorStore()
 frontendDistDir = Path(__file__).parent / "frontend" / "dist"
 
 app.add_middleware(

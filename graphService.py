@@ -3,6 +3,7 @@ from datetime import datetime
 from functools import lru_cache
 from db import getConversationTurns
 from models import TurnModel
+import vectorStore
 
 import numpy as np
 import re
@@ -22,10 +23,16 @@ class ConversationGraph:
     Every function that reads or mutates this state takes the graph explicitly;
     there is no module-global graph. Callers that mutate a graph must serialize
     on the per-conversation lock in graphStore.
+
+    `conversationId` is set for graphs loaded from the database; turn embeddings
+    then live in `vectorStore` and similarity is queried there. A graph built
+    in memory without an id (tests, the CLI) keeps embeddings on the turns and
+    similarity is computed directly.
     """
 
     turns: list[TurnModel] = field(default_factory=list)
     conceptCounter: int = 0
+    conversationId: int | None = None
 
 THRESHOLD = 0.55
 continuationThreshold = 0.55
@@ -630,18 +637,31 @@ def strongestEdgeConfidence(confidences: dict) -> float:
 
 # Cross-link retrieval
 
+def _priorTurnSimilarities(graph: ConversationGraph, embedding) -> list[tuple[int, float]]:
+    # Cosine similarity of the new turn to every already-existing turn. Uses the
+    # sqlite-vec store for db-backed graphs, in-memory embeddings otherwise.
+    priorCount = len(graph.turns)
+    if graph.conversationId is not None:
+        return vectorStore.turnSimilarities(graph.conversationId, embedding, priorCount - 1)
+    return [
+        (turn.id, embeddingSimilarity(embedding, turn.embedding))
+        for turn in graph.turns
+        if turn.embedding is not None
+    ]
+
+
 def retrieveCrossLinkCandidates(graph: ConversationGraph, embedding, timelineParent: int | None) -> list[tuple[int, float]]:
     # Direct top-k retrieval: score every prior turn by cosine similarity to the
     # new turn, with a small decay for older turns. Cheap at this scale and
     # avoids the concept-centroid layer, whose average embedding is a poor
     # representative once a concept has drifted.
+    priorCount = len(graph.turns)
     scored = []
-    for turn in graph.turns:
-        if turn.id == timelineParent or turn.embedding is None:
+    for turnId, similarity in _priorTurnSimilarities(graph, embedding):
+        if turnId == timelineParent:
             continue
-        similarity = embeddingSimilarity(embedding, turn.embedding)
-        agePenalty = olderTurnDecay * max(0, len(graph.turns) - 1 - turn.id)
-        scored.append((turn.id, similarity - agePenalty))
+        agePenalty = olderTurnDecay * max(0, priorCount - 1 - turnId)
+        scored.append((turnId, similarity - agePenalty))
 
     scored.sort(key=lambda item: item[1], reverse=True)
     return scored[:maxOlderCandidates]
@@ -727,10 +747,13 @@ def immediatePreviousTurnClassifier(
     """
     # The immediate previous turn gets the full label set and strongest classifier.
     parent = graph.turns[timelineParentId]
-    
+
     # Layer 1: Embedding similarity (candidate filter)
-    scoreToParent = embeddingSimilarity(embedding, parent.embedding)
-    
+    if graph.conversationId is not None:
+        scoreToParent = vectorStore.turnSimilarity(graph.conversationId, timelineParentId, embedding) or 0.0
+    else:
+        scoreToParent = embeddingSimilarity(embedding, parent.embedding)
+
     features = extractDiscourseFeatures(userText, parent.userText, parent.aiText)
     crossScores = scoreCrossEncoderLabels(parent.userText, parent.aiText, userText)
     
@@ -943,17 +966,15 @@ def reclassifyTurns(graph: ConversationGraph) -> list[TurnModel]:
 
 
 def loadConversationGraph(conversationId: int) -> ConversationGraph:
-    graph = ConversationGraph()
+    graph = ConversationGraph(conversationId=conversationId)
     storedTurns = getConversationTurns(conversationId)
 
     for storedTurn in storedTurns:
-        # Persisted JSON embeddings reload as Python floats, so force float32 to
-        # match fresh encoder outputs and keep similarity math consistent.
-        embedding = np.array(storedTurn["embedding"], dtype=np.float32) if storedTurn["embedding"] is not None else None
+        # Embeddings stay in vectorStore; the in-memory turn does not carry one.
         turn = TurnModel(
             id=storedTurn["id"],
             root=storedTurn["root"],
-            embedding=embedding,
+            embedding=None,
             userText=storedTurn["userText"],
             aiText=storedTurn["aiText"],
             timestamp=datetime.fromisoformat(storedTurn["timestamp"]),

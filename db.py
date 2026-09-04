@@ -60,15 +60,6 @@ def initDb():
                 FOREIGN KEY (conversationId) REFERENCES conversations(id) ON DELETE CASCADE
             );
 
-            CREATE TABLE IF NOT EXISTS turnEmbeddings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conversationId INTEGER NOT NULL,
-                turnId INTEGER NOT NULL,
-                embeddingJson TEXT NOT NULL,
-                FOREIGN KEY (conversationId) REFERENCES conversations(id) ON DELETE CASCADE,
-                UNIQUE (conversationId, turnId)
-            );
-
             CREATE INDEX IF NOT EXISTS idxTurnsConversationId
             ON turns(conversationId);
 
@@ -93,6 +84,41 @@ def initDb():
         connection.commit()
     finally:
         connection.close()
+
+
+def seedVectorStore() -> None:
+    """Copy any legacy JSON `turnEmbeddings` rows into the sqlite-vec store.
+
+    Runtime embeddings live in `vectorStore` (its db file is not committed).
+    Older / committed databases keep a JSON `turnEmbeddings` table as an inert
+    seed; this copies it into the vector store on startup so a fresh checkout
+    still has embeddings for the sample conversations. Idempotent — the vector
+    store replaces per (conversationId, turnId).
+    """
+    connection = getConnection()
+    try:
+        hasLegacyTable = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'turnEmbeddings'"
+        ).fetchone()
+        if not hasLegacyTable:
+            return
+        rows = connection.execute(
+            "SELECT conversationId, turnId, embeddingJson FROM turnEmbeddings"
+        ).fetchall()
+    finally:
+        connection.close()
+
+    import vectorStore
+
+    if not rows or vectorStore.count() >= len(rows):
+        return
+
+    for row in rows:
+        vectorStore.saveEmbedding(
+            int(row["conversationId"]),
+            int(row["turnId"]),
+            json.loads(row["embeddingJson"]),
+        )
 
 
 def createConversation(title: str | None = None) -> int:
@@ -215,21 +241,6 @@ def saveTurn(
         connection.close()
 
 
-def saveTurnEmbedding(conversationId: int, turnId: int, embedding) -> None:
-    connection = getConnection()
-    try:
-        connection.execute(
-            """
-            INSERT OR REPLACE INTO turnEmbeddings (conversationId, turnId, embeddingJson)
-            VALUES (?, ?, ?)
-            """,
-            (conversationId, turnId, json.dumps(list(embedding))),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-
-
 def saveSemanticEdges(conversationId: int, toTurnId: int, semanticParents: list[tuple[int, str, float]]):
     connection = getConnection()
     try:
@@ -325,21 +336,10 @@ def getConversationTurns(conversationId: int) -> list[dict]:
     try:
         rows = connection.execute(
             """
-            SELECT
-                turns.turnId,
-                turns.conversationId,
-                turns.userText,
-                turns.aiText,
-                turns.timestamp,
-                turns.root,
-                turns.timelineParent,
-                turnEmbeddings.embeddingJson
+            SELECT turnId, conversationId, userText, aiText, timestamp, root, timelineParent
             FROM turns
-            LEFT JOIN turnEmbeddings
-                ON turnEmbeddings.conversationId = turns.conversationId
-                AND turnEmbeddings.turnId = turns.turnId
-            WHERE turns.conversationId = ?
-            ORDER BY turns.turnId ASC
+            WHERE conversationId = ?
+            ORDER BY turnId ASC
             """,
             (conversationId,),
         ).fetchall()
@@ -382,7 +382,6 @@ def getConversationTurns(conversationId: int) -> list[dict]:
 
     turns = []
     for row in rows:
-        embedding = json.loads(row["embeddingJson"]) if row["embeddingJson"] is not None else None
         turnId = int(row["turnId"])
         turns.append(
             {
@@ -393,7 +392,6 @@ def getConversationTurns(conversationId: int) -> list[dict]:
                 "timestamp": str(row["timestamp"]),
                 "root": bool(row["root"]),
                 "timelineParent": row["timelineParent"],
-                "embedding": embedding,
                 "conceptIds": conceptIdsByTurnId.get(turnId, []),
                 "semanticParents": semanticParentsByTurnId.get(turnId, []),
             }
