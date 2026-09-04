@@ -514,6 +514,48 @@ def getConversationTurnIds(conversationId: int) -> list[int]:
     return [int(row["turnId"]) for row in rows]
 
 
+def getAllConceptMembers() -> list[dict]:
+    """Every (conversation, concept) membership with its turn text and embedding.
+
+    One row per (turn, conceptId) pair, so a turn assigned to two concepts
+    appears twice. Turns without a stored embedding are skipped. Feeds the
+    cross-conversation concept linker.
+    """
+    connection = getConnection()
+    try:
+        rows = connection.execute(
+            """
+            SELECT
+                turnConcepts.conversationId,
+                turnConcepts.conceptId,
+                turnConcepts.turnId,
+                turns.userText,
+                turnEmbeddings.embedding
+            FROM turnConcepts
+            JOIN turns
+                ON turns.conversationId = turnConcepts.conversationId
+                AND turns.turnId = turnConcepts.turnId
+            JOIN turnEmbeddings
+                ON turnEmbeddings.conversationId = turnConcepts.conversationId
+                AND turnEmbeddings.turnId = turnConcepts.turnId
+            ORDER BY turnConcepts.conversationId ASC, turnConcepts.conceptId ASC
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+
+    return [
+        {
+            "conversationId": int(row["conversationId"]),
+            "conceptId": int(row["conceptId"]),
+            "turnId": int(row["turnId"]),
+            "userText": str(row["userText"]),
+            "embedding": bytes(row["embedding"]),
+        }
+        for row in rows
+    ]
+
+
 def listConversationEdges(conversationId: int) -> list[dict]:
     connection = getConnection()
     try:
