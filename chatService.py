@@ -6,6 +6,8 @@ from db import (
     applyReclassification,
     createEdge,
     createConversation,
+    createManualConceptLink as createManualConceptLinkDb,
+    deleteConceptLink,
     deleteConversation,
     deleteEdge,
     getAllConceptMembers,
@@ -339,11 +341,20 @@ def _conceptTurnCounts(members: list[dict]) -> dict[tuple[int, int], int]:
 
 def _serializeConceptEdge(link: dict) -> dict:
     return {
-        "a": {"conversationId": link["aConversationId"], "conceptId": link["aConceptId"]},
-        "b": {"conversationId": link["bConversationId"], "conceptId": link["bConceptId"]},
+        "id": link["id"],
+        "a": {
+            "conversationId": link["aConversationId"],
+            "conceptId": link["aConceptId"],
+            "conceptKey": link["aConceptKey"],
+        },
+        "b": {
+            "conversationId": link["bConversationId"],
+            "conceptId": link["bConceptId"],
+            "conceptKey": link["bConceptKey"],
+        },
         "score": link["score"],
         "kind": link["label"],  # 'same' | 'related'
-        "origin": link["origin"],
+        "origin": link["origin"],  # 'auto' | 'manual'
     }
 
 
@@ -386,15 +397,21 @@ def listConversationConceptLinks(conversationId: int) -> dict:
     for link in listConceptLinksForConversation(conversationId):
         endpointA = (link["aConversationId"], link["aConceptId"])
         endpointB = (link["bConversationId"], link["bConceptId"])
-        near, far = (endpointA, endpointB) if endpointA[0] == conversationId else (endpointB, endpointA)
+        if endpointA[0] == conversationId:
+            near, far, farKey = endpointA, endpointB, link["bConceptKey"]
+        else:
+            near, far, farKey = endpointB, endpointA, link["aConceptKey"]
         groups.setdefault(near[1], []).append(
             {
+                "linkId": link["id"],
                 "conversationId": far[0],
                 "conceptId": far[1],
+                "conceptKey": farKey,
                 "conversationTitle": titles.get(far[0]),
                 "label": labels.get(far),
                 "score": link["score"],
                 "kind": link["label"],
+                "origin": link["origin"],
             }
         )
 
@@ -407,6 +424,19 @@ def listConversationConceptLinks(conversationId: int) -> dict:
         for conceptId, entries in sorted(groups.items())
     ]
     return {"conversationId": conversationId, "concepts": concepts}
+
+
+def createManualConceptLink(conceptKeyA: str, conceptKeyB: str, kind: str) -> dict | None:
+    """Hand-link two concepts. Manual links carry score 1.0 (human-asserted) and
+    survive re-analysis of either side as long as both concepts still exist —
+    see conceptKey in the persistence model. Returns None if either key is
+    unknown or they resolve to the same concept."""
+    link = createManualConceptLinkDb(conceptKeyA, conceptKeyB, 1.0, kind)
+    return _serializeConceptEdge(link) if link is not None else None
+
+
+def removeConceptLink(linkId: int) -> bool:
+    return deleteConceptLink(linkId)
 
 
 def processChatMessage(conversationId: int, userText: str, model: str | None = None) -> dict:

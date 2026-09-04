@@ -11,6 +11,7 @@ from chatService import (
     analyzeConversation,
     createConversationEdge,
     createConversationSession,
+    createManualConceptLink,
     deleteConversationSession,
     getConversationSession,
     isValidModelSpec,
@@ -22,6 +23,7 @@ from chatService import (
     listConversationTurns,
     patchConversationEdge,
     processChatMessage,
+    removeConceptLink,
     removeConversationEdge,
     setConversationSessionModel,
 )
@@ -30,6 +32,7 @@ from db import getConversationTurnIds, initDb
 from graphService import analyzeImmediateRelationship
 
 EDGE_LABELS = ("continuation", "branch", "related")
+CONCEPT_LINK_KINDS = ("same", "related")
 
 
 app = FastAPI()
@@ -86,6 +89,12 @@ class UpdateEdgeRequest(BaseModel):
     confidence: float | None = None
 
 
+class CreateConceptLinkRequest(BaseModel):
+    aConceptKey: str = Field(min_length=1)
+    bConceptKey: str = Field(min_length=1)
+    kind: str = "related"
+
+
 @app.get("/")
 def root():
     return {
@@ -105,6 +114,8 @@ def root():
             "GET /conversations/{conversationId}/concept-links",
             "GET /concepts/graph",
             "POST /concepts/relink",
+            "POST /concept-links",
+            "DELETE /concept-links/{linkId}",
             "POST /edges",
             "PATCH /edges/{edgeId}",
             "DELETE /edges/{edgeId}",
@@ -231,6 +242,26 @@ def getConceptGraph():
 @app.post("/concepts/relink")
 def relinkConcepts():
     return {"linkCount": relinkAllConceptLinks()}
+
+
+@app.post("/concept-links", status_code=status.HTTP_201_CREATED)
+def createConceptLink(req: CreateConceptLinkRequest):
+    if req.kind not in CONCEPT_LINK_KINDS:
+        raise HTTPException(status_code=422, detail=f"kind must be one of {list(CONCEPT_LINK_KINDS)}.")
+    if req.aConceptKey == req.bConceptKey:
+        raise HTTPException(status_code=422, detail="aConceptKey and bConceptKey must differ.")
+    link = createManualConceptLink(req.aConceptKey, req.bConceptKey, req.kind)
+    if link is None:
+        raise HTTPException(status_code=404, detail="One or both concepts were not found.")
+    return link
+
+
+@app.delete("/concept-links/{linkId}", status_code=status.HTTP_204_NO_CONTENT)
+def deleteConceptLink(linkId: int):
+    deleted = removeConceptLink(linkId)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Concept link not found.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.post("/edges", status_code=status.HTTP_201_CREATED)

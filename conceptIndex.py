@@ -5,10 +5,13 @@ module scores how close two concepts in *different* conversations are, by
 comparing their member turn embeddings, and rewrites the 'auto' rows in
 conceptLinks for one conversation at a time.
 
-Concept identity is (conversationId, conceptId). conceptIds are reassigned from
-zero on every reanalysis, so these links are disposable: relinkConversation is
-called again whenever a conversation changes, and replaceAutoConceptLinks wipes
-and rebuilds every 'auto' row touching it.
+conceptLinks is keyed by each concept's stable conceptKey (see
+db.getConceptMembership / matchConceptKeys below), not by (conversationId,
+conceptId) — conceptIds are reassigned from zero on every reanalysis, but a
+concept's key survives it by turn-overlap matching. 'auto' links are still
+disposable and rebuilt on every change (relinkConversation /
+replaceAutoConceptLinks); the key is what lets a 'manual' link keep pointing at
+the same concept across a reanalysis.
 """
 
 import logging
@@ -119,11 +122,19 @@ def conceptLabelsFromMembers(members: list[dict]) -> dict[tuple[int, int], str]:
 
 
 class ConceptProfile:
-    __slots__ = ("conversationId", "conceptId", "embeddings", "substantive")
+    __slots__ = ("conversationId", "conceptId", "conceptKey", "embeddings", "substantive")
 
-    def __init__(self, conversationId: int, conceptId: int, embeddings: np.ndarray, substantive: bool):
+    def __init__(
+        self,
+        conversationId: int,
+        conceptId: int,
+        conceptKey: str,
+        embeddings: np.ndarray,
+        substantive: bool,
+    ):
         self.conversationId = conversationId
         self.conceptId = conceptId
+        self.conceptKey = conceptKey
         self.embeddings = embeddings  # (m, d) float32, L2-normalised rows
         self.substantive = substantive
 
@@ -139,9 +150,15 @@ def _normalizeRows(matrix: np.ndarray) -> np.ndarray:
 
 
 def buildConceptProfiles(members: list[dict]) -> dict[tuple[int, int], ConceptProfile]:
-    """Group concept-member rows (from db.getAllConceptMembers) into profiles."""
+    """Group concept-member rows (from db.getAllConceptMembers) into profiles.
+
+    Still keyed by (conversationId, conceptId) for lookup convenience within a
+    single build; each profile also carries the concept's stable conceptKey,
+    which is what gets written to conceptLinks.
+    """
     vectors: dict[tuple[int, int], list[np.ndarray]] = {}
     substantive: dict[tuple[int, int], bool] = {}
+    conceptKeys: dict[tuple[int, int], str] = {}
 
     for row in members:
         key = (row["conversationId"], row["conceptId"])
@@ -149,11 +166,15 @@ def buildConceptProfiles(members: list[dict]) -> dict[tuple[int, int], ConceptPr
             np.frombuffer(row["embedding"], dtype=np.float32)
         )
         substantive[key] = substantive.get(key, False) or _isSubstantive(row["userText"])
+        if row.get("conceptKey"):
+            conceptKeys[key] = row["conceptKey"]
 
     profiles: dict[tuple[int, int], ConceptProfile] = {}
     for key, rows in vectors.items():
+        if key not in conceptKeys:
+            continue  # no stable key on record — skip rather than link something unaddressable
         matrix = _normalizeRows(np.vstack(rows).astype(np.float32))
-        profiles[key] = ConceptProfile(key[0], key[1], matrix, substantive[key])
+        profiles[key] = ConceptProfile(key[0], key[1], conceptKeys[key], matrix, substantive[key])
     return profiles
 
 
@@ -184,16 +205,16 @@ def labelForScore(score: float) -> str | None:
 def computeLinksForConversation(
     conversationId: int,
     profiles: dict[tuple[int, int], ConceptProfile],
-) -> list[tuple[int, int, int, int, float, str]]:
+) -> list[tuple[str, str, float, str]]:
     """Links from one conversation's concepts to every other conversation's.
 
-    Pure: takes the profile map, returns (convA, conceptA, convB, conceptB,
-    score, label) tuples, capped at maxLinksPerConcept per source concept.
+    Pure: takes the profile map, returns (conceptKeyA, conceptKeyB, score,
+    label) tuples, capped at maxLinksPerConcept per source concept.
     """
     targets = [p for p in profiles.values() if p.conversationId == conversationId and p.substantive]
     others = [p for p in profiles.values() if p.conversationId != conversationId and p.substantive]
 
-    links: list[tuple[int, int, int, int, float, str]] = []
+    links: list[tuple[str, str, float, str]] = []
     for target in targets:
         scored: list[tuple[float, str, ConceptProfile]] = []
         for other in others:
@@ -203,16 +224,7 @@ def computeLinksForConversation(
                 scored.append((score, label, other))
         scored.sort(key=lambda item: item[0], reverse=True)
         for score, label, other in scored[:maxLinksPerConcept]:
-            links.append(
-                (
-                    target.conversationId,
-                    target.conceptId,
-                    other.conversationId,
-                    other.conceptId,
-                    score,
-                    label,
-                )
-            )
+            links.append((target.conceptKey, other.conceptKey, score, label))
     return links
 
 

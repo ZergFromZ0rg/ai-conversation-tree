@@ -92,9 +92,14 @@ A concept is the set of turns that share a `conceptId` inside one conversation.
 `conceptId`s are reassigned from zero on every re-analysis, so each concept
 also carries a stable `conceptKey` (`turnConcepts.conceptKey`): a re-analysed
 concept inherits the key of the old concept it overlaps most (Jaccard >= 0.5,
-matched greedily), and anything new gets a fresh key. `auto` links are still
+matched greedily), and anything new gets a fresh key. `conceptLinks` is keyed
+by this pair of `conceptKey`s, not by `(conversationId, conceptId)` — so a link
+keeps pointing at the same concept across re-analysis. `auto` links are still
 deleted and rebuilt on every change — debounced on the send path, forced on
-re-analysis — but the key gives a concept an identity that survives the churn.
+re-analysis. A `manual` link (`POST /concept-links`) is left alone by that
+rebuild and only disappears if one of its two concepts stops existing (a
+concept that did not survive re-analysis, or its conversation was deleted) —
+`pruneOrphanConceptLinks` runs in both of those transactions.
 Thresholds were tuned against `eval_concept_links.py`: with
 `all-MiniLM-L6-v2` on short questions, "same topic, different wording" pairs
 land around 0.55-0.65 while the nearest false positives sit below 0.48.
@@ -171,9 +176,11 @@ Everything is saved locally in `conversationTree.db` (`SQLite`, WAL mode):
 - `turnConcepts` — `conceptKey` is a stable per-concept identity carried across
   re-analysis by turn overlap; the integer `conceptId` is only a within-
   conversation label
-- `conceptLinks` — similarity links between two concepts in *different*
-  conversations; the pair is stored once in a canonical order, with an `origin`
-  of `auto` (rebuilt on every change) or `manual`
+- `conceptLinks` — similarity links between two `conceptKey`s in *different*
+  conversations; the pair is stored once in a canonical order (no FK — a
+  key's rows live in `turnConcepts`; `pruneOrphanConceptLinks` deletes a link
+  once either key no longer exists), with an `origin` of `auto` (rebuilt on
+  every change) or `manual` (hand-created via `POST /concept-links`)
 - `turnEmbeddings` — one `float32` vector per turn, stored as a `BLOB`
   (`np.frombuffer` / `.tobytes()`), not JSON text
 
@@ -220,10 +227,15 @@ not re-read the whole history. This assumes a single backend process (one
 ### Concept Link Endpoints
 
 - `GET /concepts/graph` — the whole workspace: every concept a node
-  (`conversationId`, `conceptId`, `label`, `turnCount`, `conversationTitle`),
-  every link an edge (`a`, `b`, `score`, `kind`, `origin`)
+  (`conversationId`, `conceptId`, `conceptKey`, `label`, `turnCount`,
+  `conversationTitle`), every link an edge (`id`, `a`, `b`, `score`, `kind`,
+  `origin`); each endpoint of an edge also carries its `conceptKey`
 - `POST /concepts/relink` — rebuild every conversation's `auto` concept links
   (for a threshold change or to repair drift); returns `{"linkCount": n}`
+- `POST /concept-links` — hand-link two concepts by `conceptKey`:
+  `{"aConceptKey", "bConceptKey", "kind": "same" | "related"}`; `origin` is
+  `manual`, score fixed at `1.0`; `404` if either key is unknown
+- `DELETE /concept-links/{linkId}`
 
 ### Edge Correction Endpoints
 
@@ -293,8 +305,9 @@ Semantics:
   ],
   "edges": [
     {
-      "a": { "conversationId": 1, "conceptId": 0 },
-      "b": { "conversationId": 4, "conceptId": 2 },
+      "id": 7,
+      "a": { "conversationId": 1, "conceptId": 0, "conceptKey": "9f2c…" },
+      "b": { "conversationId": 4, "conceptId": 2, "conceptKey": "7ab1…" },
       "score": 0.71,
       "kind": "same",
       "origin": "auto"
@@ -504,8 +517,8 @@ cd frontend && npm run build
 - `same` vs `related` is a two-threshold heuristic; `all-MiniLM-L6-v2` cannot
   reliably separate genuinely adjacent topics from noise, so recall is
   conservative
-- `conceptId`s are reassigned on every re-analysis, so concept links are always
-  `auto` and rebuilt; manual concept links are not supported yet
+- there is no UI yet for creating a `manual` concept link — `POST /concept-links`
+  works, but nothing in the app calls it
 - local `Ollama` latency depends heavily on hardware and model size
 - the in-memory graph cache assumes a single backend process (one `uvicorn` worker)
 - replies are not streamed token by token
@@ -567,8 +580,8 @@ Planned work:
 
 Planned work:
 
-- use the stable `conceptKey` to key `conceptLinks` and support manual concept
-  links — `POST` / `DELETE /concept-links`
+- a UI for creating and removing a `manual` link — `POST` / `DELETE
+  /concept-links` exist, likely click-to-connect in the workspace map
 - name concepts from top terms rather than the first question
 - score concepts against each other with the cross-encoder, not just embeddings
 - a real layout for the workspace map (edges currently cross freely between

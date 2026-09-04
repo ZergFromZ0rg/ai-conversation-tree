@@ -73,22 +73,20 @@ def initDb():
                 UNIQUE (conversationId, turnId)
             );
 
-            -- Similarity links between two concepts in different conversations.
-            -- The pair is stored once, canonically ordered so that
-            -- (aConversationId, aConceptId) < (bConversationId, bConceptId).
+            -- Similarity links between two concepts in different conversations,
+            -- keyed by the concepts' stable conceptKeys (see turnConcepts).
+            -- The pair is stored once, canonically ordered aConceptKey <=
+            -- bConceptKey. No FK: a key's rows live in turnConcepts and orphans
+            -- are pruned explicitly on delete / re-analysis.
             CREATE TABLE IF NOT EXISTS conceptLinks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                aConversationId INTEGER NOT NULL,
-                aConceptId INTEGER NOT NULL,
-                bConversationId INTEGER NOT NULL,
-                bConceptId INTEGER NOT NULL,
+                aConceptKey TEXT NOT NULL,
+                bConceptKey TEXT NOT NULL,
                 score REAL NOT NULL,
                 label TEXT NOT NULL,
                 origin TEXT NOT NULL DEFAULT 'auto',
                 updatedAt TEXT NOT NULL,
-                FOREIGN KEY (aConversationId) REFERENCES conversations(id) ON DELETE CASCADE,
-                FOREIGN KEY (bConversationId) REFERENCES conversations(id) ON DELETE CASCADE,
-                UNIQUE (aConversationId, aConceptId, bConversationId, bConceptId)
+                UNIQUE (aConceptKey, bConceptKey)
             );
 
             CREATE INDEX IF NOT EXISTS idxTurnsConversationId
@@ -99,12 +97,6 @@ def initDb():
 
             CREATE INDEX IF NOT EXISTS idxTurnConceptsTurnId
             ON turnConcepts(turnId);
-
-            CREATE INDEX IF NOT EXISTS idxConceptLinksA
-            ON conceptLinks(aConversationId);
-
-            CREATE INDEX IF NOT EXISTS idxConceptLinksB
-            ON conceptLinks(bConversationId);
             """
         )
 
@@ -152,6 +144,27 @@ def initDb():
                 """,
                 (uuid.uuid4().hex, row["conversationId"], row["conceptId"]),
             )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idxTurnConceptsConceptKey ON turnConcepts(conceptKey)"
+        )
+
+        # Migrate conceptLinks from (conversationId, conceptId) pairs to
+        # conceptKey pairs. Runs after the conceptKey backfill above.
+        conceptLinkColumns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(conceptLinks)").fetchall()
+        }
+        if "aConceptKey" not in conceptLinkColumns:
+            _migrateConceptLinksToKeys(connection)
+
+        connection.execute("DROP INDEX IF EXISTS idxConceptLinksA")
+        connection.execute("DROP INDEX IF EXISTS idxConceptLinksB")
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idxConceptLinksAKey ON conceptLinks(aConceptKey)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idxConceptLinksBKey ON conceptLinks(bConceptKey)"
+        )
 
         connection.commit()
     finally:
@@ -187,6 +200,52 @@ def _migrateJsonEmbeddingsToBlob(connection: sqlite3.Connection) -> None:
         "INSERT INTO turnEmbeddings (conversationId, turnId, embedding) VALUES (?, ?, ?)",
         blobRows,
     )
+
+
+def _migrateConceptLinksToKeys(connection: sqlite3.Connection) -> None:
+    keyByConcept = {
+        (int(row["conversationId"]), int(row["conceptId"])): row["conceptKey"]
+        for row in connection.execute(
+            "SELECT DISTINCT conversationId, conceptId, conceptKey FROM turnConcepts"
+        ).fetchall()
+    }
+    legacyRows = connection.execute(
+        """
+        SELECT aConversationId, aConceptId, bConversationId, bConceptId,
+               score, label, origin, updatedAt
+        FROM conceptLinks
+        """
+    ).fetchall()
+
+    connection.execute("DROP TABLE conceptLinks")
+    connection.execute(
+        """
+        CREATE TABLE conceptLinks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            aConceptKey TEXT NOT NULL,
+            bConceptKey TEXT NOT NULL,
+            score REAL NOT NULL,
+            label TEXT NOT NULL,
+            origin TEXT NOT NULL DEFAULT 'auto',
+            updatedAt TEXT NOT NULL,
+            UNIQUE (aConceptKey, bConceptKey)
+        )
+        """
+    )
+    for row in legacyRows:
+        keyA = keyByConcept.get((int(row["aConversationId"]), int(row["aConceptId"])))
+        keyB = keyByConcept.get((int(row["bConversationId"]), int(row["bConceptId"])))
+        if not keyA or not keyB or keyA == keyB:
+            continue
+        first, second = (keyA, keyB) if keyA <= keyB else (keyB, keyA)
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO conceptLinks
+                (aConceptKey, bConceptKey, score, label, origin, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (first, second, row["score"], row["label"], row["origin"], row["updatedAt"]),
+        )
 
 
 def createConversation(title: str | None = None) -> int:
@@ -286,6 +345,10 @@ def deleteConversation(conversationId: int) -> bool:
             """,
             (conversationId,),
         )
+        # The FK cascade above already removed this conversation's turnConcepts
+        # rows, so any conceptLinks (its own 'manual' links included) pointing
+        # at those now-gone conceptKeys would otherwise dangle.
+        pruneOrphanConceptLinks(connection)
         connection.commit()
         return cursor.rowcount > 0
     finally:
@@ -469,6 +532,10 @@ def applyReclassification(
                         for conceptId in conceptIds
                     ],
                 )
+        # A concept that did not survive re-analysis (matchConceptKeys gave it
+        # no old key to inherit and nothing new points at its old key) leaves
+        # any conceptLinks — manual ones included — dangling.
+        pruneOrphanConceptLinks(connection)
         connection.commit()
     except Exception:
         connection.rollback()
@@ -776,22 +843,47 @@ def getEdge(edgeId: int) -> dict | None:
     }
 
 
-def canonicalConceptPair(
-    conv1: int, concept1: int, conv2: int, concept2: int
-) -> tuple[tuple[int, int], tuple[int, int]]:
-    """Order a concept pair so the smaller (conversationId, conceptId) comes first.
+def canonicalConceptKeyPair(keyA: str, keyB: str) -> tuple[str, str]:
+    """Order a key pair so the smaller string comes first.
 
     conceptLinks stores each unordered pair once; every writer and reader uses
     this ordering so the UNIQUE constraint sees a single canonical row.
     """
-    left = (int(conv1), int(concept1))
-    right = (int(conv2), int(concept2))
-    return (left, right) if left <= right else (right, left)
+    return (keyA, keyB) if keyA <= keyB else (keyB, keyA)
+
+
+# Resolves each link's two conceptKeys to their current (conversationId,
+# conceptId). An INNER JOIN, so a link whose concept no longer exists (dropped
+# on re-analysis, or its conversation deleted) simply does not appear.
+_CONCEPT_LINK_SELECT = """
+    WITH concept AS (
+        SELECT DISTINCT conceptKey, conversationId, conceptId
+        FROM turnConcepts
+        WHERE conceptKey IS NOT NULL
+    )
+    SELECT
+        conceptLinks.id,
+        conceptLinks.aConceptKey,
+        conceptLinks.bConceptKey,
+        conceptLinks.score,
+        conceptLinks.label,
+        conceptLinks.origin,
+        conceptLinks.updatedAt,
+        ca.conversationId AS aConversationId,
+        ca.conceptId AS aConceptId,
+        cb.conversationId AS bConversationId,
+        cb.conceptId AS bConceptId
+    FROM conceptLinks
+    JOIN concept ca ON ca.conceptKey = conceptLinks.aConceptKey
+    JOIN concept cb ON cb.conceptKey = conceptLinks.bConceptKey
+"""
 
 
 def _conceptLinkRow(row: sqlite3.Row) -> dict:
     return {
         "id": int(row["id"]),
+        "aConceptKey": str(row["aConceptKey"]),
+        "bConceptKey": str(row["bConceptKey"]),
         "aConversationId": int(row["aConversationId"]),
         "aConceptId": int(row["aConceptId"]),
         "bConversationId": int(row["bConversationId"]),
@@ -803,46 +895,70 @@ def _conceptLinkRow(row: sqlite3.Row) -> dict:
     }
 
 
-def replaceAutoConceptLinks(
-    conversationId: int,
-    links: list[tuple[int, int, int, int, float, str]],
-) -> None:
-    """Rebuild the 'auto' concept links that touch one conversation.
-
-    `links` entries are (conv1, concept1, conv2, concept2, score, label) in any
-    order; they are canonicalised here. Links between two concepts of the same
-    conversation are dropped. Hand-created ('manual') links are left untouched:
-    the delete is scoped to origin='auto', and an insert that would collide with
-    a manual row is ignored. All-or-nothing.
-    """
-    rows = []
-    for conv1, concept1, conv2, concept2, score, label in links:
-        if int(conv1) == int(conv2):
-            continue
-        (aConv, aConcept), (bConv, bConcept) = canonicalConceptPair(
-            conv1, concept1, conv2, concept2
-        )
-        rows.append((aConv, aConcept, bConv, bConcept, float(score), str(label)))
-
-    connection = getConnection()
+def pruneOrphanConceptLinks(connection: sqlite3.Connection | None = None) -> None:
+    """Delete links whose either concept no longer exists in turnConcepts."""
+    owned = connection is None
+    connection = connection or getConnection()
     try:
         connection.execute(
             """
             DELETE FROM conceptLinks
-            WHERE origin = 'auto'
-              AND (aConversationId = ? OR bConversationId = ?)
-            """,
-            (conversationId, conversationId),
+            WHERE aConceptKey NOT IN (SELECT conceptKey FROM turnConcepts WHERE conceptKey IS NOT NULL)
+               OR bConceptKey NOT IN (SELECT conceptKey FROM turnConcepts WHERE conceptKey IS NOT NULL)
+            """
         )
+        if owned:
+            connection.commit()
+    finally:
+        if owned:
+            connection.close()
+
+
+def replaceAutoConceptLinks(
+    conversationId: int,
+    links: list[tuple[str, str, float, str]],
+) -> None:
+    """Rebuild the 'auto' concept links that touch one conversation.
+
+    `links` entries are (conceptKeyA, conceptKeyB, score, label) in any order;
+    they are canonicalised here. Hand-created ('manual') links are left
+    untouched: the delete is scoped to origin='auto', and an insert that would
+    collide with a manual row is ignored. All-or-nothing.
+    """
+    rows = []
+    for keyA, keyB, score, label in links:
+        if keyA == keyB:
+            continue
+        first, second = canonicalConceptKeyPair(str(keyA), str(keyB))
+        rows.append((first, second, float(score), str(label)))
+
+    connection = getConnection()
+    try:
+        conversationKeys = [
+            row["conceptKey"]
+            for row in connection.execute(
+                "SELECT DISTINCT conceptKey FROM turnConcepts "
+                "WHERE conversationId = ? AND conceptKey IS NOT NULL",
+                (conversationId,),
+            ).fetchall()
+        ]
+        if conversationKeys:
+            placeholders = ",".join("?" * len(conversationKeys))
+            connection.execute(
+                f"""
+                DELETE FROM conceptLinks
+                WHERE origin = 'auto'
+                  AND (aConceptKey IN ({placeholders}) OR bConceptKey IN ({placeholders}))
+                """,
+                conversationKeys + conversationKeys,
+            )
         if rows:
             connection.executemany(
                 """
                 INSERT INTO conceptLinks
-                    (aConversationId, aConceptId, bConversationId, bConceptId,
-                     score, label, origin, updatedAt)
-                VALUES (?, ?, ?, ?, ?, ?, 'auto', datetime('now'))
-                ON CONFLICT (aConversationId, aConceptId, bConversationId, bConceptId)
-                DO NOTHING
+                    (aConceptKey, bConceptKey, score, label, origin, updatedAt)
+                VALUES (?, ?, ?, ?, 'auto', datetime('now'))
+                ON CONFLICT (aConceptKey, bConceptKey) DO NOTHING
                 """,
                 rows,
             )
@@ -854,16 +970,65 @@ def replaceAutoConceptLinks(
         connection.close()
 
 
+def createManualConceptLink(keyA: str, keyB: str, score: float, label: str) -> dict | None:
+    """Insert (or upgrade to 'manual') a hand-created link between two concepts.
+
+    Returns the resolved link row, or None if either key is unknown.
+    """
+    if keyA == keyB:
+        return None
+    first, second = canonicalConceptKeyPair(str(keyA), str(keyB))
+
+    connection = getConnection()
+    try:
+        known = {
+            row["conceptKey"]
+            for row in connection.execute(
+                "SELECT DISTINCT conceptKey FROM turnConcepts WHERE conceptKey IN (?, ?)",
+                (first, second),
+            ).fetchall()
+        }
+        if {first, second} - known:
+            return None
+        connection.execute(
+            """
+            INSERT INTO conceptLinks (aConceptKey, bConceptKey, score, label, origin, updatedAt)
+            VALUES (?, ?, ?, ?, 'manual', datetime('now'))
+            ON CONFLICT (aConceptKey, bConceptKey)
+            DO UPDATE SET score = excluded.score, label = excluded.label,
+                          origin = 'manual', updatedAt = excluded.updatedAt
+            """,
+            (first, second, float(score), str(label)),
+        )
+        connection.commit()
+        row = connection.execute(
+            _CONCEPT_LINK_SELECT + " WHERE conceptLinks.aConceptKey = ? AND conceptLinks.bConceptKey = ?",
+            (first, second),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    return _conceptLinkRow(row) if row is not None else None
+
+
+def deleteConceptLink(linkId: int) -> bool:
+    connection = getConnection()
+    try:
+        cursor = connection.execute("DELETE FROM conceptLinks WHERE id = ?", (linkId,))
+        connection.commit()
+        return cursor.rowcount > 0
+    finally:
+        connection.close()
+
+
 def listConceptLinksForConversation(conversationId: int) -> list[dict]:
     connection = getConnection()
     try:
         rows = connection.execute(
-            """
-            SELECT id, aConversationId, aConceptId, bConversationId, bConceptId,
-                   score, label, origin, updatedAt
-            FROM conceptLinks
-            WHERE aConversationId = ? OR bConversationId = ?
-            ORDER BY score DESC, id ASC
+            _CONCEPT_LINK_SELECT
+            + """
+            WHERE ca.conversationId = ? OR cb.conversationId = ?
+            ORDER BY conceptLinks.score DESC, conceptLinks.id ASC
             """,
             (conversationId, conversationId),
         ).fetchall()
@@ -877,12 +1042,7 @@ def listAllConceptLinks() -> list[dict]:
     connection = getConnection()
     try:
         rows = connection.execute(
-            """
-            SELECT id, aConversationId, aConceptId, bConversationId, bConceptId,
-                   score, label, origin, updatedAt
-            FROM conceptLinks
-            ORDER BY score DESC, id ASC
-            """
+            _CONCEPT_LINK_SELECT + " ORDER BY conceptLinks.score DESC, conceptLinks.id ASC"
         ).fetchall()
     finally:
         connection.close()
