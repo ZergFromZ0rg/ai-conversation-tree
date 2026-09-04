@@ -535,12 +535,20 @@ def judgeEdgeLabel(
     Convert heuristic label scores plus cross-encoder evidence into label confidences.
     """
     # Only compute confidence for labels that have some supporting signal.
+    # The pronoun-reference branch uses _maxTopicalSignal (any of similarity /
+    # userTopicSimilarity / answerSimilarity / contentOverlap), not
+    # answerSimilarity alone: a real pronoun reference ("that", "it") to the
+    # prior turn is strong discourse evidence on its own, so it only needs
+    # topic identity to not be completely absent, the same minEmbeddingFloor
+    # bar the embedding gate itself uses elsewhere — not a specific 0.3 on one
+    # particular signal, which a verbose or tangential real answer can easily
+    # miss despite the reference being unambiguous.
     hasDependencySignal = (
         features["clarificationScore"] > 0
         or features["referenceScore"] > 0
         or (
             features["pronounReferenceScore"] > 0
-            and features["answerSimilarity"] >= parallelDefinitionRelatedThreshold
+            and _maxTopicalSignal(similarity, features) >= minEmbeddingFloor
         )
         or (
             features["followupQuestionScore"] > 0
@@ -604,8 +612,15 @@ def judgeEdgeLabel(
                 and similarity >= parallelDefinitionRelatedThreshold
             )
             or (
+                # A "what about X instead"-style lateral shift is strong
+                # discourse evidence by itself; same reasoning as the
+                # pronoun-reference case in hasDependencySignal above — any
+                # topical signal at all (not userTopicSimilarity specifically)
+                # clearing the shared minEmbeddingFloor is enough, since a
+                # verbose real answer can suppress one signal while another
+                # still shows the lateral shift is topically grounded.
                 features["topicShiftScore"] > 0
-                and features["userTopicSimilarity"] >= 0.18
+                and _maxTopicalSignal(similarity, features) >= minEmbeddingFloor
             )
         )
     ):

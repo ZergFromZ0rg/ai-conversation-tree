@@ -10,8 +10,10 @@ import { WorkspaceMap } from "./components/WorkspaceMap";
 import { SettingsModal } from "./components/SettingsModal";
 
 const DRAWER_STORAGE_KEY = "act.drawerOpen";
+const SIDEBAR_STORAGE_KEY = "act.sidebarOpen";
 const MODEL_STORAGE_KEY = "act.model";
 const API_KEYS_STORAGE_KEY = "act.apiKeys";
+const NARROW_VIEWPORT_QUERY = "(max-width: 860px)";
 
 // A small curated catalog so the model picker can offer a provider's models
 // as soon as the user saves a key for it in Settings, without the backend
@@ -40,6 +42,20 @@ function readDrawerPreference() {
   }
 }
 
+function readSidebarPreference() {
+  try {
+    // Narrow viewports (mobile) always start with the sidebar-as-overlay
+    // closed, regardless of what was remembered from a wider session.
+    if (window.matchMedia(NARROW_VIEWPORT_QUERY).matches) {
+      return false;
+    }
+    const stored = window.localStorage.getItem(SIDEBAR_STORAGE_KEY);
+    return stored === null ? true : stored === "1";
+  } catch {
+    return true;
+  }
+}
+
 function readModelPreference() {
   try {
     return window.localStorage.getItem(MODEL_STORAGE_KEY) || null;
@@ -62,7 +78,7 @@ export function App() {
   const [conversationId, setConversationId] = useState(null);
   const [selectedTurnId, setSelectedTurnId] = useState(null);
   const [drawerOpen, setDrawerOpen] = useState(readDrawerPreference);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(readSidebarPreference);
   const [mapOpen, setMapOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [apiKeys, setApiKeys] = useState(readApiKeys);
@@ -160,6 +176,14 @@ export function App() {
   }, [drawerOpen]);
 
   useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_STORAGE_KEY, sidebarOpen ? "1" : "0");
+    } catch {
+      /* storage unavailable — ignore */
+    }
+  }, [sidebarOpen]);
+
+  useEffect(() => {
     function onKeyDown(event) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "g") {
         event.preventDefault();
@@ -179,7 +203,12 @@ export function App() {
       const alreadyOpen = id === conversationId;
       setConversationId(id);
       setSelectedTurnId(null);
-      setSidebarOpen(false);
+      // On a narrow (mobile) viewport the sidebar is a full overlay, so
+      // picking a conversation should dismiss it; on a wide viewport it's a
+      // docked, independently-toggled panel that a selection shouldn't touch.
+      if (window.matchMedia(NARROW_VIEWPORT_QUERY).matches) {
+        setSidebarOpen(false);
+      }
       const target = conversations.find((conversation) => conversation.id === id);
       if (target?.model) {
         setSelectedModel(target.model);
@@ -249,8 +278,8 @@ export function App() {
           <button
             type="button"
             className="iconButton menuButton"
-            aria-label="Open menu"
-            onClick={() => setSidebarOpen(true)}
+            aria-label={sidebarOpen ? "Hide conversation list" : "Show conversation list"}
+            onClick={() => setSidebarOpen((open) => !open)}
           >
             ☰
           </button>

@@ -44,7 +44,7 @@ export function ConversationSidebar({
   return (
     <>
       <div className={`sidebarBackdrop${isOpen ? " sidebarBackdropVisible" : ""}`} onClick={onClose} />
-      <aside className={`sidebar${isOpen ? " sidebarOpen" : ""}`}>
+      <aside className={`sidebar${isOpen ? " sidebarOpen" : " sidebarCollapsed"}`} aria-hidden={!isOpen}>
         <div className="sidebarHeader">
           <span className="sidebarBrand">
             <svg

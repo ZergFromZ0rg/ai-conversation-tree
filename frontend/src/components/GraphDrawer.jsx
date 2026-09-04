@@ -1,3 +1,4 @@
+import { useCallback, useRef, useState } from "react";
 import { TurnGraph } from "./TurnGraph";
 
 const legend = [
@@ -5,6 +6,24 @@ const legend = [
   { key: "branch", label: "Branch" },
   { key: "related", label: "Related" },
 ];
+
+const WIDTH_STORAGE_KEY = "act.drawerWidth";
+const MIN_WIDTH = 320;
+const MAX_WIDTH = 900;
+
+function readWidthPreference() {
+  try {
+    const stored = Number(window.localStorage.getItem(WIDTH_STORAGE_KEY));
+    return stored >= MIN_WIDTH && stored <= MAX_WIDTH ? stored : 480;
+  } catch {
+    return 480;
+  }
+}
+
+function clampWidth(width) {
+  const viewportMax = Math.min(MAX_WIDTH, window.innerWidth * 0.7);
+  return Math.min(viewportMax, Math.max(MIN_WIDTH, width));
+}
 
 function ConceptLinksPanel({ concepts, selectedConceptIds, onOpenConversation }) {
   const hasSelection = selectedConceptIds.length > 0;
@@ -65,8 +84,55 @@ export function GraphDrawer({
   onRefresh,
   isBusy,
 }) {
+  const [width, setWidth] = useState(readWidthPreference);
+  const [resizing, setResizing] = useState(false);
+  const dragRef = useRef(null);
+
+  const handlePointerDown = useCallback(
+    (event) => {
+      event.preventDefault();
+      dragRef.current = { startX: event.clientX, startWidth: width };
+      setResizing(true);
+
+      function onPointerMove(moveEvent) {
+        const { startX, startWidth } = dragRef.current;
+        // The handle sits on the drawer's left edge — dragging left (negative
+        // delta) widens the drawer, dragging right narrows it.
+        const next = clampWidth(startWidth + (startX - moveEvent.clientX));
+        dragRef.current.latestWidth = next;
+        setWidth(next);
+      }
+
+      function onPointerUp() {
+        setResizing(false);
+        window.removeEventListener("pointermove", onPointerMove);
+        window.removeEventListener("pointerup", onPointerUp);
+        try {
+          window.localStorage.setItem(WIDTH_STORAGE_KEY, String(dragRef.current.latestWidth ?? width));
+        } catch {
+          /* storage unavailable — ignore */
+        }
+      }
+
+      window.addEventListener("pointermove", onPointerMove);
+      window.addEventListener("pointerup", onPointerUp);
+    },
+    [width],
+  );
+
   return (
-    <section className={`graphDrawer${isOpen ? " graphDrawerOpen" : ""}`} aria-hidden={!isOpen}>
+    <section
+      className={`graphDrawer${isOpen ? " graphDrawerOpen" : ""}`}
+      aria-hidden={!isOpen}
+      style={{ width }}
+    >
+      <div
+        className={`graphDrawerResizeHandle${resizing ? " graphDrawerResizeHandle--active" : ""}`}
+        onPointerDown={handlePointerDown}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize conversation graph panel"
+      />
       <header className="graphDrawerHeader">
         <div className="graphDrawerTitle">
           <span>Conversation graph</span>

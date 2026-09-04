@@ -110,6 +110,17 @@ button {
   flex-direction: column;
   padding: 12px;
   gap: 8px;
+  overflow: hidden;
+  transition: width 0.2s ease, padding 0.2s ease;
+}
+
+@media (min-width: 861px) {
+  .sidebarCollapsed {
+    width: 0;
+    padding-left: 0;
+    padding-right: 0;
+    border-right: none;
+  }
 }
 
 .sidebarHeader {
@@ -300,10 +311,6 @@ button {
 .iconButton:hover {
   background: var(--bg-hover);
   color: var(--text);
-}
-
-.menuButton {
-  display: none;
 }
 
 /* ---------- transcript ---------- */
@@ -598,6 +605,7 @@ button {
 /* ---------- graph drawer ---------- */
 
 .graphDrawer {
+  position: relative;
   width: min(46%, 640px);
   flex-shrink: 0;
   border-left: 1px solid var(--border);
@@ -605,6 +613,25 @@ button {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.graphDrawerResizeHandle {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 5;
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+.graphDrawerResizeHandle:hover,
+.graphDrawerResizeHandle--active {
+  background: var(--accent);
+  opacity: 0.5;
 }
 
 .graphDrawerHeader {
@@ -1195,7 +1222,11 @@ button {
     position: fixed;
     inset: 0;
     z-index: 40;
-    width: 100%;
+    width: 100% !important;
+  }
+
+  .graphDrawerResizeHandle {
+    display: none;
   }
 
   .graphRail {
