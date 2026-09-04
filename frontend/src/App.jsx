@@ -97,6 +97,11 @@ export function App() {
 
   const selectConversation = useCallback(
     (id) => {
+      // Selecting the conversation already open won't re-trigger useConversation's
+      // own [conversationId] effect, so its turns/graph/conceptLinks would go
+      // stale after an out-of-band change (e.g. pinning a concept link from the
+      // workspace map while already viewing one side of it). Force it here.
+      const alreadyOpen = id === conversationId;
       setConversationId(id);
       setSelectedTurnId(null);
       setSidebarOpen(false);
@@ -104,8 +109,11 @@ export function App() {
       if (target?.model) {
         setSelectedModel(target.model);
       }
+      if (alreadyOpen) {
+        void refresh();
+      }
     },
-    [conversations],
+    [conversations, conversationId, refresh],
   );
 
   const createConversation = useCallback(async () => {
