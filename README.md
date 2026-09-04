@@ -106,6 +106,21 @@ land around 0.55-0.65 while the nearest false positives sit below 0.48.
 Genuinely adjacent topics the model cannot lift out of the noise floor stay
 unlinked by design.
 
+**Tried and rejected: blending in the cross-encoder.** The immediate-turn
+classifier gets real value from `cross-encoder/ms-marco-MiniLM-L-6-v2` (see
+below), so it seemed worth trying for concept scoring too. Measured against
+the same pairs `eval_concept_links.py`'s thresholds were tuned on
+(full questions and short label-style text alike): it reproduces cosine's
+top-3 ranking almost exactly (0.65-0.96) and returns ~0.000 for every other
+pair — including the ones cosine alone can't separate from noise, like
+"train a neural network" vs. "overfitting in machine learning" (0.239
+cosine, 0.00003 cross-encoder) or "REST API design" vs. "GraphQL API design"
+(0.405 cosine, 0.012 cross-encoder). It's a query-passage reranker; two full
+questions from unrelated conversations aren't the (short query, passage)
+shape it was trained on, so it just strongly confirms whatever cosine was
+already confident about and adds no signal in the gray zone — not worth the
+extra model call per candidate pair.
+
 Each concept is labelled by its most distinctive terms — term frequency
 (across the concept's own turns) times inverse concept frequency (rarer
 across the workspace scores higher), using a label-specific stopword list
@@ -639,7 +654,6 @@ Planned work:
 
 Planned work:
 
-- score concepts against each other with the cross-encoder, not just embeddings
 - filtering the workspace map to linked concepts only
 
 ### UI / Product Improvements
