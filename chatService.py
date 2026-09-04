@@ -8,9 +8,12 @@ from db import (
     createConversation,
     deleteConversation,
     deleteEdge,
+    getAllConceptMembers,
     getConversation,
     getConversationTurns,
     getEdge,
+    listAllConceptLinks,
+    listConceptLinksForConversation,
     listConversations,
     listConversationEdges,
     saveConceptIds,
@@ -20,7 +23,7 @@ from db import (
     setConversationModel,
     updateEdge,
 )
-from conceptIndex import forgetConversation, maybeRelinkConcepts
+from conceptIndex import conceptLabelsFromMembers, forgetConversation, maybeRelinkConcepts
 from graphService import addTurn, reclassifyTurns
 from graphStore import invalidate, lockedGraph
 
@@ -319,6 +322,81 @@ def listConversationGraph(conversationId: int) -> dict:
     storedTurns = getConversationTurns(conversationId)
     graph = buildGraphPayloadFromStoredTurns(conversationId, storedTurns)
     return {"conversationId": conversationId, "nodes": graph["nodes"], "edges": graph["edges"]}
+
+
+def _conceptTurnCounts(members: list[dict]) -> dict[tuple[int, int], int]:
+    counts: dict[tuple[int, int], set[int]] = {}
+    for row in members:
+        counts.setdefault((row["conversationId"], row["conceptId"]), set()).add(row["turnId"])
+    return {key: len(turnIds) for key, turnIds in counts.items()}
+
+
+def _serializeConceptEdge(link: dict) -> dict:
+    return {
+        "a": {"conversationId": link["aConversationId"], "conceptId": link["aConceptId"]},
+        "b": {"conversationId": link["bConversationId"], "conceptId": link["bConceptId"]},
+        "score": link["score"],
+        "kind": link["label"],  # 'same' | 'related'
+        "origin": link["origin"],
+    }
+
+
+def listConceptGraph() -> dict:
+    """Workspace-wide concept graph: every concept as a node, links as edges."""
+    members = getAllConceptMembers()
+    labels = conceptLabelsFromMembers(members)
+    turnCounts = _conceptTurnCounts(members)
+    titles = {conversation["id"]: conversation["title"] for conversation in listConversations()}
+
+    nodes = [
+        {
+            "conversationId": conversationId,
+            "conceptId": conceptId,
+            "label": label,
+            "turnCount": turnCounts.get((conversationId, conceptId), 0),
+            "conversationTitle": titles.get(conversationId),
+        }
+        for (conversationId, conceptId), label in sorted(labels.items())
+    ]
+    edges = [_serializeConceptEdge(link) for link in listAllConceptLinks()]
+    return {"nodes": nodes, "edges": edges}
+
+
+def listConversationConceptLinks(conversationId: int) -> dict:
+    """This conversation's concepts and, per concept, where else each is discussed.
+
+    Shaped for the transcript drawer's "also discussed in" affordance: grouped
+    by the local conceptId, each entry naming the far conversation and concept.
+    """
+    members = getAllConceptMembers()
+    labels = conceptLabelsFromMembers(members)
+    titles = {conversation["id"]: conversation["title"] for conversation in listConversations()}
+
+    groups: dict[int, list[dict]] = {}
+    for link in listConceptLinksForConversation(conversationId):
+        endpointA = (link["aConversationId"], link["aConceptId"])
+        endpointB = (link["bConversationId"], link["bConceptId"])
+        near, far = (endpointA, endpointB) if endpointA[0] == conversationId else (endpointB, endpointA)
+        groups.setdefault(near[1], []).append(
+            {
+                "conversationId": far[0],
+                "conceptId": far[1],
+                "conversationTitle": titles.get(far[0]),
+                "label": labels.get(far),
+                "score": link["score"],
+                "kind": link["label"],
+            }
+        )
+
+    concepts = [
+        {
+            "conceptId": conceptId,
+            "label": labels.get((conversationId, conceptId)),
+            "links": sorted(entries, key=lambda entry: entry["score"], reverse=True),
+        }
+        for conceptId, entries in sorted(groups.items())
+    ]
+    return {"conversationId": conversationId, "concepts": concepts}
 
 
 def processChatMessage(conversationId: int, userText: str, model: str | None = None) -> dict:

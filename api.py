@@ -15,6 +15,8 @@ from chatService import (
     getConversationSession,
     isValidModelSpec,
     listAvailableModels,
+    listConceptGraph,
+    listConversationConceptLinks,
     listConversationGraph,
     listConversationSessions,
     listConversationTurns,
@@ -23,6 +25,7 @@ from chatService import (
     removeConversationEdge,
     setConversationSessionModel,
 )
+from conceptIndex import relinkAllConceptLinks
 from db import getConversationTurnIds, initDb
 from graphService import analyzeImmediateRelationship
 
@@ -99,6 +102,9 @@ def root():
             "GET /conversations/{conversationId}/turns",
             "POST /conversations/{conversationId}/analyze",
             "GET /conversations/{conversationId}/graph",
+            "GET /conversations/{conversationId}/concept-links",
+            "GET /concepts/graph",
+            "POST /concepts/relink",
             "POST /edges",
             "PATCH /edges/{edgeId}",
             "DELETE /edges/{edgeId}",
@@ -208,6 +214,23 @@ def getGraph(conversationId: int):
     if getConversationSession(conversationId) is None:
         raise HTTPException(status_code=404, detail="Conversation not found.")
     return listConversationGraph(conversationId)
+
+
+@app.get("/conversations/{conversationId}/concept-links")
+def getConversationConceptLinks(conversationId: int):
+    if getConversationSession(conversationId) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return listConversationConceptLinks(conversationId)
+
+
+@app.get("/concepts/graph")
+def getConceptGraph():
+    return listConceptGraph()
+
+
+@app.post("/concepts/relink")
+def relinkConcepts():
+    return {"linkCount": relinkAllConceptLinks()}
 
 
 @app.post("/edges", status_code=status.HTTP_201_CREATED)

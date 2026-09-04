@@ -17,7 +17,7 @@ import time
 
 import numpy as np
 
-from db import getAllConceptMembers, replaceAutoConceptLinks
+from db import getAllConceptMembers, listAllConceptLinks, replaceAutoConceptLinks
 
 logger = logging.getLogger("conceptIndex")
 
@@ -165,16 +165,35 @@ def computeLinksForConversation(
     return links
 
 
-def relinkConversation(conversationId: int) -> int:
+def relinkConversation(
+    conversationId: int,
+    profiles: dict[tuple[int, int], ConceptProfile] | None = None,
+) -> int:
     """Recompute and persist the 'auto' concept links touching one conversation.
 
     Returns the number of links written. Symmetric over time: relinking the
     other conversation later deletes and recreates the same pairs from its side.
+    Pass `profiles` to reuse a workspace-wide build across several conversations.
     """
-    profiles = buildConceptProfiles(getAllConceptMembers())
+    if profiles is None:
+        profiles = buildConceptProfiles(getAllConceptMembers())
     links = computeLinksForConversation(conversationId, profiles)
     replaceAutoConceptLinks(conversationId, links)
     return len(links)
+
+
+def relinkAllConceptLinks() -> int:
+    """Recompute every conversation's 'auto' concept links. Returns the total.
+
+    Builds concept profiles once and reuses them. Used by POST /concepts/relink
+    to rebuild after a threshold change or to repair drift.
+    """
+    profiles = buildConceptProfiles(getAllConceptMembers())
+    now = time.monotonic()
+    for conversationId in sorted({key[0] for key in profiles}):
+        relinkConversation(conversationId, profiles)
+        _lastRelink[conversationId] = now
+    return len(listAllConceptLinks())
 
 
 # How long after a relink to skip the next one on the send path. Reanalysis
