@@ -17,6 +17,7 @@ from db import (
     saveSemanticEdges,
     saveTurn,
     saveTurnEmbedding,
+    setConversationModel,
     updateEdge,
 )
 from graphService import addTurn, reclassifyTurns
@@ -99,39 +100,47 @@ def extractOllamaText(responseBody: dict) -> str:
     return ""
 
 
-def generateAiText(userText: str) -> str:
-    ollamaModelName = os.environ.get("OLLAMA_MODEL")
-    if ollamaModelName:
-        ollamaBaseUrl = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-        response = httpx.post(
-            f"{ollamaBaseUrl}/api/chat",
-            json={
-                "model": ollamaModelName,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": userText,
-                    }
-                ],
-                "stream": False,
-            },
-            timeout=60.0,
-        )
-        response.raise_for_status()
-        responseBody = response.json()
-        aiText = extractOllamaText(responseBody)
-        if not aiText:
-            raise RuntimeError("Ollama returned no text output.")
-        return aiText
+KNOWN_PROVIDERS = ("ollama", "openai", "stub")
 
-    if os.environ.get("AI_CONVERSATION_TREE_STUB_LLM", "1") == "1":
-        return f"Stub LLM response for: {userText}"
 
+def parseModelSpec(modelSpec: str | None) -> tuple[str | None, str | None]:
+    """Split "provider:model" into (provider, model).
+
+    Ollama tags contain colons ("llama3:8b"), so only the first colon is a
+    separator. "stub" and a bare provider yield model=None. A falsy spec yields
+    (None, None) -> fall back to the environment-configured provider.
+    """
+    if not modelSpec:
+        return None, None
+    provider, _, model = modelSpec.partition(":")
+    return provider, (model or None)
+
+
+def ollamaBaseUrl() -> str:
+    return os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+
+
+def generateOllamaText(userText: str, model: str) -> str:
+    response = httpx.post(
+        f"{ollamaBaseUrl()}/api/chat",
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": userText}],
+            "stream": False,
+        },
+        timeout=60.0,
+    )
+    response.raise_for_status()
+    aiText = extractOllamaText(response.json())
+    if not aiText:
+        raise RuntimeError("Ollama returned no text output.")
+    return aiText
+
+
+def generateOpenAiText(userText: str, model: str) -> str:
     apiKey = os.environ.get("OPENAI_API_KEY")
     if not apiKey:
-        raise RuntimeError("Set OLLAMA_MODEL, set OPENAI_API_KEY, or enable AI_CONVERSATION_TREE_STUB_LLM=1.")
-
-    modelName = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
+        raise RuntimeError("OPENAI_API_KEY is not set.")
     response = httpx.post(
         "https://api.openai.com/v1/responses",
         headers={
@@ -139,7 +148,7 @@ def generateAiText(userText: str) -> str:
             "Content-Type": "application/json",
         },
         json={
-            "model": modelName,
+            "model": model,
             "input": [
                 {
                     "role": "user",
@@ -150,11 +159,77 @@ def generateAiText(userText: str) -> str:
         timeout=60.0,
     )
     response.raise_for_status()
-    responseBody = response.json()
-    aiText = extractResponseText(responseBody)
+    aiText = extractResponseText(response.json())
     if not aiText:
         raise RuntimeError("LLM returned no text output.")
     return aiText
+
+
+def envDefaultModelSpec() -> str:
+    """The model spec that matches the current environment-based routing."""
+    ollamaModelName = os.environ.get("OLLAMA_MODEL")
+    if ollamaModelName:
+        return f"ollama:{ollamaModelName}"
+    if os.environ.get("AI_CONVERSATION_TREE_STUB_LLM", "1") == "1":
+        return "stub"
+    if os.environ.get("OPENAI_API_KEY"):
+        return f"openai:{os.environ.get('OPENAI_MODEL', 'gpt-5-mini')}"
+    return "stub"
+
+
+def generateAiText(userText: str, modelSpec: str | None = None) -> str:
+    provider, model = parseModelSpec(modelSpec or envDefaultModelSpec())
+
+    if provider == "stub":
+        return f"Stub LLM response for: {userText}"
+    if provider == "ollama":
+        if not model:
+            raise RuntimeError("An ollama model spec needs a model name, e.g. 'ollama:llama3'.")
+        return generateOllamaText(userText, model)
+    if provider == "openai":
+        return generateOpenAiText(userText, model or os.environ.get("OPENAI_MODEL", "gpt-5-mini"))
+    raise RuntimeError(f"Unknown model provider: {provider!r}. Expected one of {list(KNOWN_PROVIDERS)}.")
+
+
+def listAvailableModels() -> dict:
+    options: list[dict] = []
+
+    ollamaReachable = False
+    try:
+        response = httpx.get(f"{ollamaBaseUrl()}/api/tags", timeout=2.0)
+        response.raise_for_status()
+        ollamaReachable = True
+        for entry in sorted(response.json().get("models", []), key=lambda m: m.get("name", "")):
+            name = entry.get("name")
+            if name:
+                options.append({"id": f"ollama:{name}", "label": name, "provider": "ollama"})
+    except Exception:
+        pass
+
+    if os.environ.get("OPENAI_API_KEY"):
+        openAiModel = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
+        options.append(
+            {"id": f"openai:{openAiModel}", "label": f"OpenAI · {openAiModel}", "provider": "openai"}
+        )
+
+    stubEnabled = os.environ.get("AI_CONVERSATION_TREE_STUB_LLM", "1") == "1"
+    if stubEnabled or not options:
+        options.append({"id": "stub", "label": "Stub (canned replies)", "provider": "stub"})
+
+    return {
+        "models": options,
+        "default": envDefaultModelSpec(),
+        "ollamaReachable": ollamaReachable,
+    }
+
+
+def isValidModelSpec(modelSpec: str) -> bool:
+    provider, model = parseModelSpec(modelSpec)
+    if provider not in KNOWN_PROVIDERS:
+        return False
+    if provider in ("ollama", "openai") and not model:
+        return False
+    return True
 
 
 def serializeStoredTurns(storedTurns: list[dict]) -> list[dict]:
@@ -200,8 +275,10 @@ def persistGraphTurn(conversationId: int, turn) -> None:
     saveConceptIds(conversationId, turn.id, turn.conceptIds)
 
 
-def createConversationSession(title: str | None = None) -> dict:
+def createConversationSession(title: str | None = None, model: str | None = None) -> dict:
     conversationId = createConversation(title)
+    if model:
+        setConversationModel(conversationId, model)
     return {"conversationId": conversationId}
 
 
@@ -211,6 +288,10 @@ def listConversationSessions() -> dict:
 
 def getConversationSession(conversationId: int) -> dict | None:
     return getConversation(conversationId)
+
+
+def setConversationSessionModel(conversationId: int, model: str | None) -> dict | None:
+    return setConversationModel(conversationId, model)
 
 
 def loadConversationSession(conversationId: int) -> dict:
@@ -238,10 +319,18 @@ def listConversationGraph(conversationId: int) -> dict:
     return {"conversationId": conversationId, "nodes": graph["nodes"], "edges": graph["edges"]}
 
 
-def processChatMessage(conversationId: int, userText: str) -> dict:
+def processChatMessage(conversationId: int, userText: str, model: str | None = None) -> dict:
+    # An explicit model on the request wins and becomes the conversation's
+    # default; otherwise fall back to the conversation's stored choice, then to
+    # the environment-configured provider.
+    conversation = getConversation(conversationId)
+    modelSpec = model or (conversation or {}).get("model")
+    if model and (conversation or {}).get("model") != model:
+        setConversationModel(conversationId, model)
+
     # Generate the AI reply before taking the lock so the (potentially slow) LLM
     # call does not serialize other work on this conversation's graph.
-    aiText = generateAiText(userText)
+    aiText = generateAiText(userText, modelSpec)
 
     with lockedGraph(conversationId) as graph:
         turn = addTurn(graph, userText, aiText)

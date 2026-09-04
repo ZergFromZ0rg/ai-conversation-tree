@@ -25,6 +25,7 @@ def initDb():
             CREATE TABLE IF NOT EXISTS conversations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT,
+                model TEXT,
                 createdAt TEXT NOT NULL,
                 updatedAt TEXT NOT NULL
             );
@@ -91,6 +92,14 @@ def initDb():
                 "ALTER TABLE semanticEdges ADD COLUMN origin TEXT NOT NULL DEFAULT 'auto'"
             )
 
+        # Migrate databases created before conversations.model existed.
+        conversationColumns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(conversations)").fetchall()
+        }
+        if "model" not in conversationColumns:
+            connection.execute("ALTER TABLE conversations ADD COLUMN model TEXT")
+
         # Migrate databases that stored embeddings as JSON text.
         embeddingColumns = {
             row["name"]
@@ -156,7 +165,7 @@ def listConversations() -> list[dict]:
     try:
         rows = connection.execute(
             """
-            SELECT id, title, createdAt, updatedAt
+            SELECT id, title, model, createdAt, updatedAt
             FROM conversations
             ORDER BY updatedAt DESC, id DESC
             """
@@ -168,6 +177,7 @@ def listConversations() -> list[dict]:
         {
             "id": int(row["id"]),
             "title": row["title"],
+            "model": row["model"],
             "createdAt": str(row["createdAt"]),
             "updatedAt": str(row["updatedAt"]),
         }
@@ -180,7 +190,7 @@ def getConversation(conversationId: int) -> dict | None:
     try:
         row = connection.execute(
             """
-            SELECT id, title, createdAt, updatedAt
+            SELECT id, title, model, createdAt, updatedAt
             FROM conversations
             WHERE id = ?
             """,
@@ -195,9 +205,30 @@ def getConversation(conversationId: int) -> dict | None:
     return {
         "id": int(row["id"]),
         "title": row["title"],
+        "model": row["model"],
         "createdAt": str(row["createdAt"]),
         "updatedAt": str(row["updatedAt"]),
     }
+
+
+def setConversationModel(conversationId: int, model: str | None) -> dict | None:
+    connection = getConnection()
+    try:
+        cursor = connection.execute(
+            """
+            UPDATE conversations
+            SET model = ?, updatedAt = datetime('now')
+            WHERE id = ?
+            """,
+            (model, conversationId),
+        )
+        connection.commit()
+        if cursor.rowcount == 0:
+            return None
+    finally:
+        connection.close()
+
+    return getConversation(conversationId)
 
 
 def deleteConversation(conversationId: int) -> bool:

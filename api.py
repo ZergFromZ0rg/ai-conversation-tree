@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -12,12 +13,15 @@ from chatService import (
     createConversationSession,
     deleteConversationSession,
     getConversationSession,
+    isValidModelSpec,
+    listAvailableModels,
     listConversationGraph,
     listConversationSessions,
     listConversationTurns,
     patchConversationEdge,
     processChatMessage,
     removeConversationEdge,
+    setConversationSessionModel,
 )
 from db import getConversationTurnIds, initDb
 from graphService import analyzeImmediateRelationship
@@ -48,10 +52,16 @@ if frontendAssetsDir.is_dir():
 
 class CreateConversationRequest(BaseModel):
     title: str | None = None
+    model: str | None = None
 
 
 class CreateTurnRequest(BaseModel):
     userText: str = Field(min_length=1)
+    model: str | None = None
+
+
+class UpdateConversationRequest(BaseModel):
+    model: str | None = None
 
 
 class ImmediateDebugRequest(BaseModel):
@@ -79,9 +89,11 @@ def root():
         "message": "AI Conversation Tree API",
         "endpoints": [
             "GET /ui",
+            "GET /models",
             "POST /conversations",
             "GET /conversations",
             "GET /conversations/{conversationId}",
+            "PATCH /conversations/{conversationId}",
             "DELETE /conversations/{conversationId}",
             "POST /conversations/{conversationId}/turns",
             "GET /conversations/{conversationId}/turns",
@@ -113,9 +125,19 @@ def ui():
     return FileResponse(indexPath, media_type="text/html")
 
 
+@app.get("/models")
+def getModels():
+    return listAvailableModels()
+
+
 @app.post("/conversations", status_code=status.HTTP_201_CREATED)
 def createConversation(req: CreateConversationRequest):
-    return createConversationSession(req.title)
+    if req.model is not None and not isValidModelSpec(req.model):
+        raise HTTPException(
+            status_code=422,
+            detail="model must be 'stub', 'ollama:<name>', or 'openai:<name>'.",
+        )
+    return createConversationSession(req.title, req.model)
 
 
 @app.get("/conversations")
@@ -126,6 +148,19 @@ def listConversations():
 @app.get("/conversations/{conversationId}")
 def getConversation(conversationId: int):
     conversation = getConversationSession(conversationId)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return conversation
+
+
+@app.patch("/conversations/{conversationId}")
+def updateConversation(conversationId: int, req: UpdateConversationRequest):
+    if req.model is not None and not isValidModelSpec(req.model):
+        raise HTTPException(
+            status_code=422,
+            detail="model must be 'stub', 'ollama:<name>', or 'openai:<name>'.",
+        )
+    conversation = setConversationSessionModel(conversationId, req.model)
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found.")
     return conversation
@@ -143,7 +178,15 @@ def deleteConversation(conversationId: int):
 def createTurn(conversationId: int, req: CreateTurnRequest):
     if getConversationSession(conversationId) is None:
         raise HTTPException(status_code=404, detail="Conversation not found.")
-    return processChatMessage(conversationId, req.userText)
+    if req.model is not None and not isValidModelSpec(req.model):
+        raise HTTPException(
+            status_code=422,
+            detail="model must be 'stub', 'ollama:<name>', or 'openai:<name>'.",
+        )
+    try:
+        return processChatMessage(conversationId, req.userText, req.model)
+    except (httpx.HTTPError, RuntimeError) as error:
+        raise HTTPException(status_code=502, detail=f"Model provider error: {error}") from error
 
 
 @app.get("/conversations/{conversationId}/turns")
