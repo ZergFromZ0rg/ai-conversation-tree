@@ -6,5 +6,3 @@ __pycache__/
 .vscode/
 *.db-wal
 *.db-shm
-conversationVectors.db
-conversationVectors.db-*

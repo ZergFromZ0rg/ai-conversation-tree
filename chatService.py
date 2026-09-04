@@ -16,11 +16,11 @@ from db import (
     saveConceptIds,
     saveSemanticEdges,
     saveTurn,
+    saveTurnEmbedding,
     updateEdge,
 )
 from graphService import addTurn, reclassifyTurns
 from graphStore import invalidate, lockedGraph
-import vectorStore
 
 
 def serializeGraphNode(nodeId: int, userText: str, aiText: str, conceptIds: list[int], root: bool, timelineParent: int | None) -> dict:
@@ -195,7 +195,7 @@ def persistGraphTurn(conversationId: int, turn) -> None:
         root=turn.root,
         timelineParent=turn.timelineParent,
     )
-    vectorStore.saveEmbedding(conversationId, turn.id, turn.embedding.tolist())
+    saveTurnEmbedding(conversationId, turn.id, turn.embedding.astype("float32").tobytes())
     saveSemanticEdges(conversationId, turn.id, turn.semanticParents)
     saveConceptIds(conversationId, turn.id, turn.conceptIds)
 
@@ -221,7 +221,6 @@ def loadConversationSession(conversationId: int) -> dict:
 
 def deleteConversationSession(conversationId: int) -> bool:
     deleted = deleteConversation(conversationId)
-    vectorStore.deleteConversation(conversationId)
     invalidate(conversationId)
     return deleted
 

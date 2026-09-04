@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import struct
 from pathlib import Path
 
 
@@ -60,6 +61,15 @@ def initDb():
                 FOREIGN KEY (conversationId) REFERENCES conversations(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS turnEmbeddings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversationId INTEGER NOT NULL,
+                turnId INTEGER NOT NULL,
+                embedding BLOB NOT NULL,
+                FOREIGN KEY (conversationId) REFERENCES conversations(id) ON DELETE CASCADE,
+                UNIQUE (conversationId, turnId)
+            );
+
             CREATE INDEX IF NOT EXISTS idxTurnsConversationId
             ON turns(conversationId);
 
@@ -81,44 +91,48 @@ def initDb():
                 "ALTER TABLE semanticEdges ADD COLUMN origin TEXT NOT NULL DEFAULT 'auto'"
             )
 
+        # Migrate databases that stored embeddings as JSON text.
+        embeddingColumns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(turnEmbeddings)").fetchall()
+        }
+        if "embeddingJson" in embeddingColumns:
+            _migrateJsonEmbeddingsToBlob(connection)
+
         connection.commit()
     finally:
         connection.close()
 
 
-def seedVectorStore() -> None:
-    """Copy any legacy JSON `turnEmbeddings` rows into the sqlite-vec store.
+def _migrateJsonEmbeddingsToBlob(connection: sqlite3.Connection) -> None:
+    legacyRows = connection.execute(
+        "SELECT conversationId, turnId, embeddingJson FROM turnEmbeddings"
+    ).fetchall()
 
-    Runtime embeddings live in `vectorStore` (its db file is not committed).
-    Older / committed databases keep a JSON `turnEmbeddings` table as an inert
-    seed; this copies it into the vector store on startup so a fresh checkout
-    still has embeddings for the sample conversations. Idempotent — the vector
-    store replaces per (conversationId, turnId).
-    """
-    connection = getConnection()
-    try:
-        hasLegacyTable = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'turnEmbeddings'"
-        ).fetchone()
-        if not hasLegacyTable:
-            return
-        rows = connection.execute(
-            "SELECT conversationId, turnId, embeddingJson FROM turnEmbeddings"
-        ).fetchall()
-    finally:
-        connection.close()
-
-    import vectorStore
-
-    if not rows or vectorStore.count() >= len(rows):
-        return
-
-    for row in rows:
-        vectorStore.saveEmbedding(
-            int(row["conversationId"]),
-            int(row["turnId"]),
-            json.loads(row["embeddingJson"]),
+    blobRows = []
+    for row in legacyRows:
+        values = json.loads(row["embeddingJson"])
+        blobRows.append(
+            (int(row["conversationId"]), int(row["turnId"]), struct.pack(f"{len(values)}f", *values))
         )
+
+    connection.execute("DROP TABLE turnEmbeddings")
+    connection.execute(
+        """
+        CREATE TABLE turnEmbeddings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversationId INTEGER NOT NULL,
+            turnId INTEGER NOT NULL,
+            embedding BLOB NOT NULL,
+            FOREIGN KEY (conversationId) REFERENCES conversations(id) ON DELETE CASCADE,
+            UNIQUE (conversationId, turnId)
+        )
+        """
+    )
+    connection.executemany(
+        "INSERT INTO turnEmbeddings (conversationId, turnId, embedding) VALUES (?, ?, ?)",
+        blobRows,
+    )
 
 
 def createConversation(title: str | None = None) -> int:
@@ -241,6 +255,21 @@ def saveTurn(
         connection.close()
 
 
+def saveTurnEmbedding(conversationId: int, turnId: int, embeddingBytes: bytes) -> None:
+    connection = getConnection()
+    try:
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO turnEmbeddings (conversationId, turnId, embedding)
+            VALUES (?, ?, ?)
+            """,
+            (conversationId, turnId, sqlite3.Binary(embeddingBytes)),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def saveSemanticEdges(conversationId: int, toTurnId: int, semanticParents: list[tuple[int, str, float]]):
     connection = getConnection()
     try:
@@ -336,10 +365,21 @@ def getConversationTurns(conversationId: int) -> list[dict]:
     try:
         rows = connection.execute(
             """
-            SELECT turnId, conversationId, userText, aiText, timestamp, root, timelineParent
+            SELECT
+                turns.turnId,
+                turns.conversationId,
+                turns.userText,
+                turns.aiText,
+                turns.timestamp,
+                turns.root,
+                turns.timelineParent,
+                turnEmbeddings.embedding
             FROM turns
-            WHERE conversationId = ?
-            ORDER BY turnId ASC
+            LEFT JOIN turnEmbeddings
+                ON turnEmbeddings.conversationId = turns.conversationId
+                AND turnEmbeddings.turnId = turns.turnId
+            WHERE turns.conversationId = ?
+            ORDER BY turns.turnId ASC
             """,
             (conversationId,),
         ).fetchall()
@@ -392,6 +432,7 @@ def getConversationTurns(conversationId: int) -> list[dict]:
                 "timestamp": str(row["timestamp"]),
                 "root": bool(row["root"]),
                 "timelineParent": row["timelineParent"],
+                "embedding": bytes(row["embedding"]) if row["embedding"] is not None else None,
                 "conceptIds": conceptIdsByTurnId.get(turnId, []),
                 "semanticParents": semanticParentsByTurnId.get(turnId, []),
             }

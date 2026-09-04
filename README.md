@@ -77,7 +77,7 @@ Backend:
 
 - `Python`
 - `FastAPI`
-- `SQLite` — `sqlite-vec` (vectors) via `apsw`, stdlib `sqlite3` for everything else
+- `SQLite`
 - `Pydantic`
 - `NumPy`
 - `sentence-transformers`
@@ -104,9 +104,7 @@ Backend:
 - `graphStore.py`
   - per-conversation graph cache (LRU) and per-conversation write lock
 - `db.py`
-  - `SQLite` schema and helpers (`conversationTree.db`)
-- `vectorStore.py`
-  - `sqlite-vec` turn-embedding store (`conversationVectors.db`, via `apsw`)
+  - `SQLite` schema and helpers
 - `models.py`
   - application data models
 
@@ -123,20 +121,14 @@ Frontend (`frontend/src/`):
 
 ## Persistence Model
 
-`conversationTree.db` (`SQLite`, WAL mode) stores:
+Everything is saved locally in `conversationTree.db` (`SQLite`, WAL mode):
 
 - `conversations`
 - `turns`
 - `semanticEdges` — each edge carries an `origin` of `auto` (classifier) or `manual` (hand-created via `POST /edges`)
 - `turnConcepts`
-
-Turn embeddings live in a separate `conversationVectors.db`, in a `sqlite-vec`
-`vec0` virtual table (native `float[384]` vectors, cosine metric). Similarity is
-a `vec_distance_cosine(...)` query rather than JSON text parsed and looped over
-in Python. It is accessed through `apsw` because the stdlib `sqlite3` build on
-some platforms is compiled without loadable-extension support. That db file is
-not committed; on startup any legacy `turnEmbeddings` JSON table found in
-`conversationTree.db` is copied into it as a seed.
+- `turnEmbeddings` — one `float32` vector per turn, stored as a `BLOB`
+  (`np.frombuffer` / `.tobytes()`), not JSON text
 
 The first request for a conversation rebuilds its in-memory `ConversationGraph`
 from persisted rows; `graphStore` then keeps it cached so subsequent turns do
@@ -345,7 +337,7 @@ curl -X POST http://127.0.0.1:8000/conversations/1/analyze
 Backend syntax:
 
 ```bash
-venv/bin/python -m py_compile api.py chatService.py graphService.py graphStore.py db.py vectorStore.py models.py
+venv/bin/python -m py_compile api.py chatService.py graphService.py graphStore.py db.py models.py
 ```
 
 Persistence milestone:
@@ -369,7 +361,7 @@ cd frontend && npm run build
 
 ## Current Limitations
 
-- older-turn retrieval scans every prior turn (`vec_distance_cosine` in SQL, but still one row per turn rather than an ANN index)
+- older-turn retrieval is a brute-force cosine scan over every prior turn's embedding in Python (fine at this scale)
 - local `Ollama` latency depends heavily on hardware and model size
 - the in-memory graph cache assumes a single backend process (one `uvicorn` worker)
 - replies are not streamed token by token
@@ -399,19 +391,18 @@ Planned work:
 
 ### Postgres + pgvector
 
-`SQLite` + `sqlite-vec` is correct for a local proof of concept. A hosted
-version would move to `Postgres` + `pgvector` for real concurrency, a proper
-migration path, and an approximate-nearest-neighbour index (`sqlite-vec` KNN is
-still a full scan today).
+Local `SQLite` is correct for a proof of concept. A hosted version would move to
+`Postgres` + `pgvector` for real concurrency, a proper migration path, and
+database-side approximate-nearest-neighbour search over the embeddings.
 
 ### Retrieval Improvements
 
-Older-turn retrieval computes `vec_distance_cosine` for every prior turn in the
-conversation (minus a small age decay). Fine for local conversations, but linear.
+Older-turn retrieval loads every prior turn's embedding and scores it in Python
+(cosine minus a small age decay). Fine for local conversations, but linear.
 
 Planned improvements:
 
-- an ANN index instead of a per-turn scan (see the `pgvector` note above)
+- database-side vector search instead of a Python scan (see the `pgvector` note above)
 - better candidate pruning and age-decay tuning
 - optional topic/subtopic segmentation for large conversations
 
