@@ -29,6 +29,7 @@ export function ChatTranscript({
   turns,
   pendingUserText,
   isSending,
+  streamingText,
   selectedTurnId,
   onSelectTurn,
   hasConversation,
@@ -47,8 +48,10 @@ export function ChatTranscript({
   }, [selectedTurnId]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [turns.length, pendingUserText, isSending]);
+    // Instant while text is actively growing (a "smooth" scroll per token
+    // would fight itself); smooth for turn/state changes otherwise.
+    bottomRef.current?.scrollIntoView({ behavior: streamingText ? "auto" : "smooth", block: "end" });
+  }, [turns.length, pendingUserText, isSending, streamingText]);
 
   if (!hasConversation) {
     return (
@@ -99,7 +102,11 @@ export function ChatTranscript({
         {pendingUserText ? (
           <div className="turnBlock">
             <ChatMessage role="user" text={pendingUserText} />
-            {isSending ? <TypingIndicator /> : null}
+            {streamingText ? (
+              <ChatMessage role="assistant" text={streamingText} />
+            ) : isSending ? (
+              <TypingIndicator />
+            ) : null}
           </div>
         ) : null}
 

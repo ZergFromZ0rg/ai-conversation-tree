@@ -215,6 +215,18 @@ not re-read the whole history. This assumes a single backend process (one
   title yet, the title becomes the user message (collapsed, trimmed to 60 chars
   on a word boundary) — a title given at creation (`POST /conversations`) is
   never overwritten
+- `POST /conversations/{conversationId}/turns/stream` — same request body and
+  side effects (model override, auto-title, concept relink), but the response
+  is `text/event-stream`: any number of `{"type": "delta", "text": "..."}`
+  events as the reply is generated, then one
+  `{"type": "done", "turnId", "aiText", "turns", "nodes", "edges"}` carrying
+  the same payload the blocking endpoint returns. A provider or persistence
+  failure arrives as `{"type": "error", "message": "..."}` instead of an HTTP
+  error status — by the time that can happen the response has already started
+  with `200`, so there's no status left to change. `Ollama` and the stub
+  stream real token-by-token chunks; `OpenAI` doesn't (its Responses API
+  streaming protocol isn't implemented, see Current Limitations) and sends
+  its whole reply as one `delta`
 - `GET /conversations/{conversationId}/turns`
 
 ### Graph Endpoints
@@ -353,8 +365,14 @@ third colour and labelled "pinned". Clicking a pinned link removes it; clicking
 an `auto` link in this mode does nothing — those come from the classifier, not
 from a click.
 
-The UI follows the browser's light/dark preference. It does not stream replies
-token by token yet.
+Assistant replies stream in token by token via
+`POST /conversations/{conversationId}/turns/stream` (`text/event-stream`); the
+composer shows a typing indicator until the first chunk arrives, then grows
+the reply in place. Classification and persistence still happen only once the
+full reply is in — the graph, concept links, and title update right after the
+stream ends, same as the blocking path.
+
+The UI follows the browser's light/dark preference.
 
 ## Local Setup
 
@@ -468,6 +486,17 @@ curl -X POST http://127.0.0.1:8000/conversations/1/turns \
   -d '{"userText":"What are cats?","model":"ollama:qwen2.5:0.5b"}'
 ```
 
+### Add a turn and watch it stream
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/conversations/1/turns/stream \
+  -H "Content-Type: application/json" \
+  -d '{"userText":"What are cats?"}'
+```
+
+`-N` disables curl's output buffering so the `delta` events print as they
+arrive instead of all at once at the end.
+
 ### Get the graph
 
 ```bash
@@ -531,7 +560,10 @@ cd frontend && npm run build
   there's no way to record a weaker hand-made connection
 - local `Ollama` latency depends heavily on hardware and model size
 - the in-memory graph cache assumes a single backend process (one `uvicorn` worker)
-- replies are not streamed token by token
+- `OpenAI` replies don't stream token by token — `streamAiText` falls back to
+  the blocking call and sends the whole reply as one SSE chunk, because
+  nothing here can exercise the Responses API's streaming format without a
+  live key
 - no auth, multi-user isolation, or production deployment concerns are addressed
 
 ## Future Work
@@ -599,7 +631,9 @@ Planned work:
 
 Planned work:
 
-- stream assistant replies token by token
+- real token-by-token streaming for `OpenAI` (implementing and testing the
+  Responses API's streaming SSE format needs a live key — streaming for the
+  stub and `Ollama` is done)
 - conversation rename (auto-titling from the first message is done)
 - edge-correction tooling in the drawer (create / relabel / delete edges)
 - graph filtering by edge type and subgraph focus

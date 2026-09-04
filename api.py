@@ -1,9 +1,10 @@
+import json
 from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -26,6 +27,7 @@ from chatService import (
     removeConceptLink,
     removeConversationEdge,
     setConversationSessionModel,
+    streamChatMessage,
 )
 from conceptIndex import relinkAllConceptLinks
 from db import getConversationTurnIds, initDb
@@ -108,6 +110,7 @@ def root():
             "PATCH /conversations/{conversationId}",
             "DELETE /conversations/{conversationId}",
             "POST /conversations/{conversationId}/turns",
+            "POST /conversations/{conversationId}/turns/stream",
             "GET /conversations/{conversationId}/turns",
             "POST /conversations/{conversationId}/analyze",
             "GET /conversations/{conversationId}/graph",
@@ -204,6 +207,30 @@ def createTurn(conversationId: int, req: CreateTurnRequest):
         return processChatMessage(conversationId, req.userText, req.model)
     except (httpx.HTTPError, RuntimeError) as error:
         raise HTTPException(status_code=502, detail=f"Model provider error: {error}") from error
+
+
+@app.post("/conversations/{conversationId}/turns/stream")
+def createTurnStream(conversationId: int, req: CreateTurnRequest):
+    if getConversationSession(conversationId) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    if req.model is not None and not isValidModelSpec(req.model):
+        raise HTTPException(
+            status_code=422,
+            detail="model must be 'stub', 'ollama:<name>', or 'openai:<name>'.",
+        )
+
+    def events():
+        # The response has already started (200, text/event-stream) by the
+        # time a provider or persistence failure can happen, so a failure here
+        # goes out as an {"type": "error"} event rather than an HTTP status —
+        # there is no HTTP status left to change at this point.
+        try:
+            for event in streamChatMessage(conversationId, req.userText, req.model):
+                yield f"data: {json.dumps(event)}\n\n"
+        except (httpx.HTTPError, RuntimeError) as error:
+            yield f"data: {json.dumps({'type': 'error', 'message': f'Model provider error: {error}'})}\n\n"
+
+    return StreamingResponse(events(), media_type="text/event-stream")
 
 
 @app.get("/conversations/{conversationId}/turns")

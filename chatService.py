@@ -1,5 +1,7 @@
 from datetime import datetime
+import json
 import os
+import time
 import httpx
 
 from db import (
@@ -201,6 +203,74 @@ def generateAiText(userText: str, modelSpec: str | None = None) -> str:
         return generateOllamaText(userText, model)
     if provider == "openai":
         return generateOpenAiText(userText, model or os.environ.get("OPENAI_MODEL", "gpt-5-mini"))
+    raise RuntimeError(f"Unknown model provider: {provider!r}. Expected one of {list(KNOWN_PROVIDERS)}.")
+
+
+# ---- streaming ----
+# Splits a reply into incremental text chunks as it's generated, instead of
+# waiting for the whole thing. Classification still needs the complete text
+# (it embeds userText + " " + aiText), so streaming only changes what the
+# composer shows while the reply is in flight — persistence happens the same
+# way afterward, once the stream ends (see streamChatMessage).
+
+stubStreamWordsPerChunk = 3
+stubStreamDelaySeconds = 0.05
+
+
+def _streamStubText(userText: str):
+    words = f"Stub LLM response for: {userText}".split(" ")
+    for index in range(0, len(words), stubStreamWordsPerChunk):
+        chunk = " ".join(words[index : index + stubStreamWordsPerChunk])
+        if index > 0:
+            chunk = " " + chunk
+        time.sleep(stubStreamDelaySeconds)  # otherwise a local stub reply streams instantly
+        yield chunk
+
+
+def generateOllamaTextStream(userText: str, model: str):
+    with httpx.stream(
+        "POST",
+        f"{ollamaBaseUrl()}/api/chat",
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": userText}],
+            "stream": True,
+        },
+        timeout=60.0,
+    ) as response:
+        response.raise_for_status()
+        for line in response.iter_lines():
+            if not line:
+                continue
+            chunk = json.loads(line)
+            content = (chunk.get("message") or {}).get("content", "")
+            if content:
+                yield content
+            if chunk.get("done"):
+                break
+
+
+def streamAiText(userText: str, modelSpec: str | None = None):
+    """Yield a reply as it's generated. Same provider routing as generateAiText.
+
+    OpenAI's Responses API streaming protocol isn't implemented (nothing here
+    can exercise it without a live key) — that path falls back to the blocking
+    call and yields the whole reply as one chunk, so the streaming endpoint
+    still works end to end for it, just without token-by-token output.
+    """
+    provider, model = parseModelSpec(modelSpec or envDefaultModelSpec())
+
+    if provider == "stub":
+        yield from _streamStubText(userText)
+        return
+    if provider == "ollama":
+        if not model:
+            raise RuntimeError("An ollama model spec needs a model name, e.g. 'ollama:llama3'.")
+        yield from generateOllamaTextStream(userText, model)
+        return
+    if provider == "openai":
+        yield generateOpenAiText(userText, model or os.environ.get("OPENAI_MODEL", "gpt-5-mini"))
+        return
     raise RuntimeError(f"Unknown model provider: {provider!r}. Expected one of {list(KNOWN_PROVIDERS)}.")
 
 
@@ -452,18 +522,22 @@ def _titleFromText(text: str) -> str:
     return (head or collapsed[:conversationTitleMaxChars].rstrip()) + "…"
 
 
-def processChatMessage(conversationId: int, userText: str, model: str | None = None) -> dict:
-    # An explicit model on the request wins and becomes the conversation's
-    # default; otherwise fall back to the conversation's stored choice, then to
-    # the environment-configured provider.
+def _resolveModelForConversation(conversationId: int, model: str | None) -> str | None:
+    """An explicit model on the request wins and becomes the conversation's
+    default; otherwise fall back to the conversation's stored choice, then to
+    the environment-configured provider (generateAiText / streamAiText's own
+    fallback when this returns None)."""
     conversation = getConversation(conversationId)
-    modelSpec = model or (conversation or {}).get("model")
     if model and (conversation or {}).get("model") != model:
         setConversationModel(conversationId, model)
+    return model or (conversation or {}).get("model")
 
-    # Generate the AI reply before taking the lock so the (potentially slow) LLM
-    # call does not serialize other work on this conversation's graph.
-    aiText = generateAiText(userText, modelSpec)
+
+def _finalizeTurn(conversationId: int, userText: str, aiText: str) -> dict:
+    """Shared tail of the blocking and streaming send paths: classify and
+    persist the turn, auto-title the conversation on its first turn, and
+    refresh cross-chat concept links. Assumes the AI reply is already in hand."""
+    conversation = getConversation(conversationId)
 
     with lockedGraph(conversationId) as graph:
         turn = addTurn(graph, userText, aiText)
@@ -482,6 +556,37 @@ def processChatMessage(conversationId: int, userText: str, model: str | None = N
     payload["turnId"] = turn.id
     payload["aiText"] = turn.aiText
     return payload
+
+
+def processChatMessage(conversationId: int, userText: str, model: str | None = None) -> dict:
+    modelSpec = _resolveModelForConversation(conversationId, model)
+    # Generate the AI reply before taking the lock so the (potentially slow) LLM
+    # call does not serialize other work on this conversation's graph.
+    aiText = generateAiText(userText, modelSpec)
+    return _finalizeTurn(conversationId, userText, aiText)
+
+
+def streamChatMessage(conversationId: int, userText: str, model: str | None = None):
+    """Generator of SSE-ready event dicts for one turn.
+
+    Yields any number of {"type": "delta", "text": "..."} as the reply comes
+    in, then exactly one {"type": "done", ...} carrying the same payload shape
+    processChatMessage returns (turnId, aiText, turns, nodes, edges). Persists
+    nothing until the reply is complete — same ordering as the blocking path,
+    just with the network wait broken into visible pieces.
+    """
+    modelSpec = _resolveModelForConversation(conversationId, model)
+    chunks: list[str] = []
+    for chunk in streamAiText(userText, modelSpec):
+        chunks.append(chunk)
+        yield {"type": "delta", "text": chunk}
+
+    aiText = "".join(chunks)
+    if not aiText:
+        raise RuntimeError("Model returned no text output.")
+
+    payload = _finalizeTurn(conversationId, userText, aiText)
+    yield {"type": "done", **payload}
 
 
 def analyzeConversation(conversationId: int) -> dict:

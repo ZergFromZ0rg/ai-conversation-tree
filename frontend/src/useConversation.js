@@ -7,7 +7,8 @@ const emptyConceptLinks = { concepts: [] };
 /**
  * Owns one conversation's turns + graph and the actions that mutate them.
  * `status` is one of: "idle" | "loading" | "sending" | "analyzing" | "error".
- * `pendingUserText` holds an optimistic user message while a turn is in flight.
+ * `pendingUserText` holds an optimistic user message while a turn is in flight;
+ * `streamingText` grows token by token alongside it as the reply streams in.
  */
 export function useConversation(conversationId) {
   const [turns, setTurns] = useState([]);
@@ -15,6 +16,7 @@ export function useConversation(conversationId) {
   const [conceptLinks, setConceptLinks] = useState(emptyConceptLinks);
   const [status, setStatus] = useState("idle");
   const [pendingUserText, setPendingUserText] = useState(null);
+  const [streamingText, setStreamingText] = useState("");
 
   const refresh = useCallback(async () => {
     if (!conversationId) {
@@ -51,13 +53,25 @@ export function useConversation(conversationId) {
         return;
       }
       setPendingUserText(userText);
+      setStreamingText("");
       setStatus("sending");
       try {
-        await api.sendTurn(conversationId, userText, model);
+        for await (const event of api.streamTurn(conversationId, userText, model)) {
+          if (event.type === "delta") {
+            setStreamingText((prev) => prev + event.text);
+          } else if (event.type === "error") {
+            throw new Error(event.message);
+          }
+          // "done" carries the full persisted payload, but re-fetching below
+          // (turns + graph + conceptLinks together) is simpler than
+          // reconciling it in place and keeps one source of truth.
+        }
         setPendingUserText(null);
+        setStreamingText("");
         await refresh();
       } catch {
         setPendingUserText(null);
+        setStreamingText("");
         setStatus("error");
       }
     },
@@ -77,5 +91,15 @@ export function useConversation(conversationId) {
     }
   }, [conversationId, refresh]);
 
-  return { turns, graph, conceptLinks, status, pendingUserText, sendTurn, analyze, refresh };
+  return {
+    turns,
+    graph,
+    conceptLinks,
+    status,
+    pendingUserText,
+    streamingText,
+    sendTurn,
+    analyze,
+    refresh,
+  };
 }

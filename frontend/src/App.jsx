@@ -37,8 +37,17 @@ export function App() {
   const [models, setModels] = useState([]);
   const [selectedModel, setSelectedModel] = useState(readModelPreference);
 
-  const { turns, graph, conceptLinks, status, pendingUserText, sendTurn, analyze, refresh } =
-    useConversation(conversationId);
+  const {
+    turns,
+    graph,
+    conceptLinks,
+    status,
+    pendingUserText,
+    streamingText,
+    sendTurn,
+    analyze,
+    refresh,
+  } = useConversation(conversationId);
 
   const isBusy = status === "loading" || status === "sending" || status === "analyzing";
   const turnCount = turns.length;
@@ -195,6 +204,7 @@ export function App() {
         <ChatTranscript
           turns={turns}
           pendingUserText={pendingUserText}
+          streamingText={streamingText}
           isSending={status === "sending"}
           selectedTurnId={selectedTurnId}
           onSelectTurn={setSelectedTurnId}
