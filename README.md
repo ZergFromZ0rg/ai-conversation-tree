@@ -358,6 +358,15 @@ concept across every conversation as a node, laid out in a grid clustered and
 coloured by conversation, with the cross-conversation concept links as edges.
 Clicking a concept switches to that conversation.
 
+Every row of clusters has a genuinely empty gap above and below it (nothing is
+ever drawn there); an edge between two nodes that a straight line would cut
+through other clusters to reach is routed through that gap instead — down or
+up out of its own row, across, and into the target's row from its own gap. Two
+concepts more than one row apart share no single gap, so that case adds one
+more hop: out to a fixed vertical lane past the last column, then down to the
+target's row. Same-conversation or same-row-adjacent-column edges skip all of
+this — a straight line already doesn't cross anything.
+
 `Link concepts` in the map toolbar switches to hand-linking mode: click one
 concept, then another, to `POST /concept-links` a `manual` link between them
 (the toggle next to it picks `related` or `same`); a pinned link is drawn in a
@@ -624,8 +633,7 @@ Planned work:
 
 - name concepts from top terms rather than the first question
 - score concepts against each other with the cross-encoder, not just embeddings
-- a real layout for the workspace map (edges currently cross freely between
-  clusters); filtering it to linked concepts only
+- filtering the workspace map to linked concepts only
 
 ### UI / Product Improvements
 

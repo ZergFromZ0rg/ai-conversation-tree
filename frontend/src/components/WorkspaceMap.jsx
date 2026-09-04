@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Background, Controls, Handle, MarkerType, Position, ReactFlow } from "@xyflow/react";
+import { BaseEdge, Background, Controls, Handle, MarkerType, Position, ReactFlow } from "@xyflow/react";
 import { api } from "../api";
 
 const COLUMNS = 4;
@@ -9,6 +9,9 @@ const NODE_HEIGHT = 60;
 const NODE_GAP = 14;
 const HEADER_HEIGHT = 34;
 const ROW_GAP = 52;
+// Fixed vertical "highway" x, past every column in every row, that an edge
+// between rows more than one apart is routed through — see buildRoutedPath.
+const HIGHWAY_X = COLUMNS * COLUMN_WIDTH + 60;
 
 const LINK_KINDS = ["related", "same"];
 
@@ -24,6 +27,10 @@ const conversationColors = [
   "#fb7185",
 ];
 
+// A pinned (manual) link's colour — deliberately outside conversationColors
+// so it never coincides with a node's own hue.
+const manualLinkColor = "#fbbf24";
+
 function truncate(text, limit = 64) {
   const normalized = (text ?? "").replace(/\s+/g, " ").trim();
   return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 1)}…`;
@@ -35,17 +42,125 @@ function ConceptNode({ data }) {
     .join(" ");
   return (
     <div className={className} style={{ borderColor: data.isPending ? undefined : data.color }}>
-      <Handle type="target" position={Position.Left} className="conceptNodeHandle" />
+      {/* Edges route via own explicit paths (buildRoutedPath), entering/leaving
+          top or bottom depending which is closer to their row's free lane —
+          these handles exist for React Flow's bookkeeping, not for geometry. */}
+      <Handle type="target" position={Position.Top} className="conceptNodeHandle" />
       <div className="conceptNodeTitle" style={{ color: data.color }}>
         {data.conversationTitle}
       </div>
       <div className="conceptNodeLabel">{truncate(data.label)}</div>
-      <Handle type="source" position={Position.Right} className="conceptNodeHandle" />
+      <Handle type="source" position={Position.Bottom} className="conceptNodeHandle" />
     </div>
   );
 }
 
 const nodeTypes = { conceptNode: ConceptNode };
+
+// Renders the explicit path buildRoutedPath computed; falls back to nothing
+// (React Flow then just doesn't draw anything for a malformed edge — never
+// hit in practice, buildLayout always supplies a path when this type is used).
+function RoutedEdge({ data, style, label, labelStyle, labelBgStyle, markerStart, markerEnd }) {
+  if (!data?.path) {
+    return null;
+  }
+  return (
+    <BaseEdge
+      path={data.path}
+      style={style}
+      label={label}
+      labelX={data.labelX}
+      labelY={data.labelY}
+      labelStyle={labelStyle}
+      labelBgStyle={labelBgStyle}
+      markerStart={markerStart}
+      markerEnd={markerEnd}
+    />
+  );
+}
+
+const edgeTypes = { routed: RoutedEdge };
+
+// Each row of clusters sits in a "band" of node cards with a genuinely empty
+// horizontal gap (ROW_GAP) above and below it — nothing is ever drawn there.
+// ownLaneY picks the gap adjacent to a given row: below it, or above it for
+// the last row (which has no gap below). Returns null only when there is
+// exactly one row total, so no gap exists anywhere to route through.
+function ownLaneY(rowIndex, rowTops, rowBandBottoms) {
+  const numRows = rowTops.length;
+  if (rowIndex < numRows - 1) {
+    return { y: (rowBandBottoms[rowIndex] + rowTops[rowIndex + 1]) / 2, side: "bottom" };
+  }
+  if (rowIndex > 0) {
+    return { y: (rowBandBottoms[rowIndex - 1] + rowTops[rowIndex]) / 2, side: "top" };
+  }
+  return null;
+}
+
+// Routes an edge entirely through the empty row-gap lanes (and, when the two
+// concepts' lanes differ, a fixed vertical "highway" past every column) so it
+// never crosses a node card — unlike a direct line, which cuts straight
+// through whatever sits between two far-apart clusters. Returns null for
+// edges a straight line already handles fine (same conversation; same row,
+// adjacent columns) or when no lane exists to route through (single-row
+// workspace) — callers fall back to a plain bezier in both cases.
+function buildRoutedPath(sourceId, targetId, positionsById, metaById, rowTops, rowBandBottoms, laneIndex) {
+  const source = positionsById.get(sourceId);
+  const target = positionsById.get(targetId);
+  const sourceMeta = metaById.get(sourceId);
+  const targetMeta = metaById.get(targetId);
+  if (!source || !target || !sourceMeta || !targetMeta) {
+    return null;
+  }
+  if (sourceMeta.conversationId === targetMeta.conversationId) {
+    return null;
+  }
+  if (sourceMeta.row === targetMeta.row && Math.abs(sourceMeta.col - targetMeta.col) <= 1) {
+    return null;
+  }
+
+  const sourceLane = ownLaneY(sourceMeta.row, rowTops, rowBandBottoms);
+  const targetLane = ownLaneY(targetMeta.row, rowTops, rowBandBottoms);
+  if (!sourceLane || !targetLane) {
+    return null;
+  }
+
+  // Nudge parallel edges apart so two links sharing a lane don't overlap.
+  const jitter = ((laneIndex % 3) - 1) * 6;
+  const sourceCenterX = source.x + NODE_WIDTH / 2;
+  const targetCenterX = target.x + NODE_WIDTH / 2;
+  const sourceExitY = sourceLane.side === "bottom" ? source.y + NODE_HEIGHT : source.y;
+  const targetExitY = targetLane.side === "bottom" ? target.y + NODE_HEIGHT : target.y;
+  const sourceLaneY = sourceLane.y + jitter;
+  const targetLaneY = targetLane.y + jitter;
+
+  if (Math.abs(sourceLaneY - targetLaneY) < 1) {
+    return {
+      d: [
+        `M ${sourceCenterX} ${sourceExitY}`,
+        `L ${sourceCenterX} ${sourceLaneY}`,
+        `L ${targetCenterX} ${targetLaneY}`,
+        `L ${targetCenterX} ${targetExitY}`,
+      ].join(" "),
+      labelX: (sourceCenterX + targetCenterX) / 2,
+      labelY: sourceLaneY,
+    };
+  }
+
+  const highwayX = HIGHWAY_X + jitter;
+  return {
+    d: [
+      `M ${sourceCenterX} ${sourceExitY}`,
+      `L ${sourceCenterX} ${sourceLaneY}`,
+      `L ${highwayX} ${sourceLaneY}`,
+      `L ${highwayX} ${targetLaneY}`,
+      `L ${targetCenterX} ${targetLaneY}`,
+      `L ${targetCenterX} ${targetExitY}`,
+    ].join(" "),
+    labelX: highwayX,
+    labelY: (sourceLaneY + targetLaneY) / 2,
+  };
+}
 
 function buildLayout(graph) {
   const byConversation = new Map();
@@ -72,10 +187,16 @@ function buildLayout(graph) {
   });
 
   const flowNodes = [];
+  const positionsById = new Map();
+  const metaById = new Map();
+  const rowTops = [];
+  const rowBandBottoms = [];
   let rowTop = 0;
+  let rowIndex = 0;
   for (let start = 0; start < conversations.length; start += COLUMNS) {
     const row = conversations.slice(start, start + COLUMNS);
     const tallest = Math.max(...row.map((conversation) => conversation.concepts.length));
+    rowTops.push(rowTop);
 
     row.forEach((conversation, column) => {
       const x = column * COLUMN_WIDTH;
@@ -95,12 +216,11 @@ function buildLayout(graph) {
         .slice()
         .sort((left, right) => left.conceptId - right.conceptId)
         .forEach((concept, index) => {
+          const id = `${concept.conversationId}:${concept.conceptId}`;
+          const position = { x, y: rowTop + HEADER_HEIGHT + index * (NODE_HEIGHT + NODE_GAP) };
           flowNodes.push({
-            id: `${concept.conversationId}:${concept.conceptId}`,
-            position: {
-              x,
-              y: rowTop + HEADER_HEIGHT + index * (NODE_HEIGHT + NODE_GAP),
-            },
+            id,
+            position,
             type: "conceptNode",
             data: {
               label: concept.label,
@@ -112,22 +232,33 @@ function buildLayout(graph) {
             draggable: false,
             style: { width: NODE_WIDTH },
           });
+          positionsById.set(id, position);
+          metaById.set(id, { row: rowIndex, col: column, conversationId: concept.conversationId });
         });
     });
 
+    rowBandBottoms.push(rowTop + HEADER_HEIGHT + tallest * (NODE_HEIGHT + NODE_GAP) - NODE_GAP);
     rowTop += HEADER_HEIGHT + tallest * (NODE_HEIGHT + NODE_GAP) + ROW_GAP;
+    rowIndex += 1;
   }
 
-  const flowEdges = graph.edges.map((edge) => {
+  const flowEdges = graph.edges.map((edge, index) => {
     const isManual = edge.origin === "manual";
-    const color = isManual ? "#f472b6" : edge.kind === "same" ? "#60a5fa" : "#94a3b8";
+    // manualLinkColor is deliberately not in conversationColors — a pinned
+    // link must never coincide with whichever hue a node happens to have.
+    const color = isManual ? manualLinkColor : edge.kind === "same" ? "#60a5fa" : "#94a3b8";
+    const sourceId = `${edge.a.conversationId}:${edge.a.conceptId}`;
+    const targetId = `${edge.b.conversationId}:${edge.b.conceptId}`;
+    const routed = buildRoutedPath(sourceId, targetId, positionsById, metaById, rowTops, rowBandBottoms, index);
+    const label = isManual ? `${edge.kind} · pinned` : `${edge.kind} ${edge.score.toFixed(2)}`;
+
     return {
       id: String(edge.id),
-      source: `${edge.a.conversationId}:${edge.a.conceptId}`,
-      target: `${edge.b.conversationId}:${edge.b.conceptId}`,
-      type: "bezier",
-      label: isManual ? `${edge.kind} · pinned` : `${edge.kind} ${edge.score.toFixed(2)}`,
-      data: { linkId: edge.id, origin: edge.origin },
+      source: sourceId,
+      target: targetId,
+      type: routed ? "routed" : "bezier",
+      label,
+      data: { linkId: edge.id, origin: edge.origin, path: routed?.d, labelX: routed?.labelX, labelY: routed?.labelY },
       style: {
         stroke: color,
         strokeWidth: isManual || edge.kind === "same" ? 2.4 : 1.8,
@@ -326,6 +457,7 @@ export function WorkspaceMap({ onClose, onOpenConversation }) {
               nodes={nodesForRender}
               edges={layout.flowEdges}
               nodeTypes={allNodeTypes}
+              edgeTypes={edgeTypes}
               fitView
               fitViewOptions={{ padding: 0.15 }}
               nodesDraggable={false}
