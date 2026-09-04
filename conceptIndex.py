@@ -21,9 +21,14 @@ from db import getAllConceptMembers, listAllConceptLinks, replaceAutoConceptLink
 
 logger = logging.getLogger("conceptIndex")
 
-# Score bands for a concept pair (mean of the top-k pairwise cosines).
-sameThreshold = 0.70
-relatedThreshold = 0.55
+# Score bands for a concept pair (mean of the top-k pairwise cosines). Tuned
+# against eval_concept_links.py: with all-MiniLM-L6-v2 on short questions,
+# "same topic, different wording" pairs land around 0.55-0.65 and the nearest
+# false positives sit below 0.48, so 0.52 is a clean cut. "same" is reserved
+# for near-duplicate phrasing (~0.66+); the model rarely separates genuinely
+# adjacent topics from noise below that, so those stay unlinked by design.
+sameThreshold = 0.66
+relatedThreshold = 0.52
 
 topK = 3
 maxLinksPerConcept = 3
@@ -112,7 +117,8 @@ def scoreConceptPair(a: ConceptProfile, b: ConceptProfile) -> float:
 
     Rows are already L2-normalised, so the dot product is the cosine. Top-k
     (not max) keeps one coincidental turn pair from forging a link; not the
-    full mean, which would dilute a broad concept.
+    full mean, which would dilute a broad concept. Compared against
+    sameThreshold / relatedThreshold in labelForScore.
     """
     sims = (a.embeddings @ b.embeddings.T).ravel()
     if sims.size == 0:
