@@ -36,7 +36,14 @@ branchMinScore = 1.0
 continuationMinScore = 1.2
 relatedMinScore = 2.25
 relatedSimilarityThreshold = THRESHOLD
-edgeConfidenceThreshold = 0.5
+# The final "is this confidence high enough to commit to a label" bar
+# (selectEdgeLabel and both immediate/older-turn candidate checks). Was 0.5;
+# a real pronoun-reference follow-up ("what makes that book stand out?")
+# computed a genuine, reasoned branch confidence of 0.491 — just under the
+# old bar — once the _maxTopicalSignal-based gate loosening let it be scored
+# at all. Lowered with real margin below that value (not shaved to the
+# minimum that passes it) so this isn't fit to one example.
+edgeConfidenceThreshold = 0.45
 candidateSignalThreshold = 0.52
 crossCandidateThreshold = 0.5
 parallelDefinitionRelatedThreshold = 0.3
@@ -649,6 +656,12 @@ def judgeEdgeLabel(
 
 
 def selectEdgeLabel(confidences: dict) -> tuple[str, float] | None:
+    # confidences["unrelated"] is always exactly 1 - bestConfidence (see
+    # judgeEdgeLabel), so "unrelated >= best" is definitionally just another
+    # way of writing "best <= 0.5" — a second, hardcoded 0.5 floor that used
+    # to silently reintroduce the old cutoff no matter what
+    # edgeConfidenceThreshold was actually set to. edgeConfidenceThreshold
+    # below is the one real "confident enough to commit" bar.
     edgeConfidences = {
         label: confidence
         for label, confidence in confidences.items()
@@ -657,8 +670,6 @@ def selectEdgeLabel(confidences: dict) -> tuple[str, float] | None:
     bestLabel = max(edgeConfidences, key=edgeConfidences.get)
     bestConfidence = edgeConfidences[bestLabel]
 
-    if confidences["unrelated"] >= bestConfidence:
-        return None
     if bestConfidence < edgeConfidenceThreshold:
         return None
 
