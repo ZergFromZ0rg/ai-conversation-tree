@@ -11,11 +11,15 @@ called again whenever a conversation changes, and replaceAutoConceptLinks wipes
 and rebuilds every 'auto' row touching it.
 """
 
+import logging
 import re
+import time
 
 import numpy as np
 
 from db import getAllConceptMembers, replaceAutoConceptLinks
+
+logger = logging.getLogger("conceptIndex")
 
 # Score bands for a concept pair (mean of the top-k pairwise cosines).
 sameThreshold = 0.70
@@ -171,3 +175,33 @@ def relinkConversation(conversationId: int) -> int:
     links = computeLinksForConversation(conversationId, profiles)
     replaceAutoConceptLinks(conversationId, links)
     return len(links)
+
+
+# How long after a relink to skip the next one on the send path. Reanalysis
+# forces a relink regardless. Plain dict access under the GIL is good enough
+# here: a lost update just means one extra or one skipped relink.
+relinkDebounceSeconds = 30.0
+_lastRelink: dict[int, float] = {}
+
+
+def maybeRelinkConcepts(conversationId: int, force: bool = False) -> None:
+    """Best-effort relink after a conversation changes.
+
+    Debounced on the send path so a burst of turns relinks once; `force=True`
+    (reanalysis) always runs. Never raises — a linking failure must not fail
+    the turn or the reanalysis that triggered it.
+    """
+    now = time.monotonic()
+    if not force and now - _lastRelink.get(conversationId, 0.0) < relinkDebounceSeconds:
+        return
+    try:
+        written = relinkConversation(conversationId)
+        _lastRelink[conversationId] = now
+        logger.debug("relinked conversation %s: %d concept links", conversationId, written)
+    except Exception:
+        logger.exception("concept relink failed for conversation %s", conversationId)
+
+
+def forgetConversation(conversationId: int) -> None:
+    """Drop debounce state for a deleted conversation (its links cascade in SQL)."""
+    _lastRelink.pop(conversationId, None)

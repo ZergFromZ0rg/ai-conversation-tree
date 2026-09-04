@@ -20,6 +20,7 @@ from db import (
     setConversationModel,
     updateEdge,
 )
+from conceptIndex import forgetConversation, maybeRelinkConcepts
 from graphService import addTurn, reclassifyTurns
 from graphStore import invalidate, lockedGraph
 
@@ -303,6 +304,7 @@ def loadConversationSession(conversationId: int) -> dict:
 def deleteConversationSession(conversationId: int) -> bool:
     deleted = deleteConversation(conversationId)
     invalidate(conversationId)
+    forgetConversation(conversationId)
     return deleted
 
 
@@ -337,6 +339,10 @@ def processChatMessage(conversationId: int, userText: str, model: str | None = N
         persistGraphTurn(conversationId, turn)
         payload = buildConversationPayload(conversationId)
 
+    # Outside the lock: refresh this conversation's cross-chat concept links
+    # (debounced, best-effort — never fails the turn).
+    maybeRelinkConcepts(conversationId)
+
     payload["turnId"] = turn.id
     payload["aiText"] = turn.aiText
     return payload
@@ -360,6 +366,11 @@ def analyzeConversation(conversationId: int) -> dict:
         )
 
         payload = buildConversationPayload(conversationId)
+
+    # conceptIds were just reassigned from zero, so every 'auto' link touching
+    # this conversation is stale — force a rebuild.
+    maybeRelinkConcepts(conversationId, force=True)
+
     return {
         "conversationId": conversationId,
         "turnCount": len(payload["turns"]),
