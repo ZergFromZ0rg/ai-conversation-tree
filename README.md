@@ -211,7 +211,10 @@ not re-read the whole history. This assumes a single backend process (one
 
 - `POST /conversations/{conversationId}/turns` — optional `model` overrides the
   provider for this turn and becomes the conversation's new default; a provider
-  failure returns `502`
+  failure returns `502`. If this is the conversation's first turn and it has no
+  title yet, the title becomes the user message (collapsed, trimmed to 60 chars
+  on a word boundary) — a title given at creation (`POST /conversations`) is
+  never overwritten
 - `GET /conversations/{conversationId}/turns`
 
 ### Graph Endpoints
@@ -597,7 +600,7 @@ Planned work:
 Planned work:
 
 - stream assistant replies token by token
-- auto-title conversations from the first message; conversation rename
+- conversation rename (auto-titling from the first message is done)
 - edge-correction tooling in the drawer (create / relabel / delete edges)
 - graph filtering by edge type and subgraph focus
 

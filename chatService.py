@@ -24,6 +24,7 @@ from db import (
     saveTurn,
     saveTurnEmbedding,
     setConversationModel,
+    setConversationTitle,
     updateEdge,
 )
 from conceptIndex import (
@@ -439,6 +440,18 @@ def removeConceptLink(linkId: int) -> bool:
     return deleteConceptLink(linkId)
 
 
+conversationTitleMaxChars = 60
+
+
+def _titleFromText(text: str) -> str:
+    """First user message, collapsed and trimmed to a word boundary."""
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= conversationTitleMaxChars:
+        return collapsed
+    head = collapsed[:conversationTitleMaxChars].rsplit(" ", 1)[0].rstrip()
+    return (head or collapsed[:conversationTitleMaxChars].rstrip()) + "…"
+
+
 def processChatMessage(conversationId: int, userText: str, model: str | None = None) -> dict:
     # An explicit model on the request wins and becomes the conversation's
     # default; otherwise fall back to the conversation's stored choice, then to
@@ -456,6 +469,11 @@ def processChatMessage(conversationId: int, userText: str, model: str | None = N
         turn = addTurn(graph, userText, aiText)
         persistGraphTurn(conversationId, turn)
         payload = buildConversationPayload(conversationId)
+
+    # This conversation's very first turn: title it from the question, unless
+    # it was already given a title (e.g. POST /conversations {"title": ...}).
+    if turn.timelineParent is None and not (conversation or {}).get("title"):
+        setConversationTitle(conversationId, _titleFromText(userText))
 
     # Outside the lock: refresh this conversation's cross-chat concept links
     # (debounced, best-effort — never fails the turn).

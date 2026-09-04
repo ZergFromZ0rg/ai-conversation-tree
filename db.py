@@ -335,6 +335,22 @@ def setConversationModel(conversationId: int, model: str | None) -> dict | None:
     return getConversation(conversationId)
 
 
+def setConversationTitle(conversationId: int, title: str) -> dict | None:
+    connection = getConnection()
+    try:
+        cursor = connection.execute(
+            "UPDATE conversations SET title = ? WHERE id = ?",
+            (title, conversationId),
+        )
+        connection.commit()
+        if cursor.rowcount == 0:
+            return None
+    finally:
+        connection.close()
+
+    return getConversation(conversationId)
+
+
 def deleteConversation(conversationId: int) -> bool:
     connection = getConnection()
     try:
