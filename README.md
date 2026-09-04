@@ -89,9 +89,12 @@ A concept is the set of turns that share a `conceptId` inside one conversation.
 4. concepts with no turn of at least four distinct word tokens are skipped, so
    greetings and acknowledgements do not link
 
-Links are disposable. `conceptId`s are reassigned from zero on every
-re-analysis, so after any change to a conversation its `auto` links are deleted
-and rebuilt from scratch (debounced on the send path, forced on re-analysis).
+`conceptId`s are reassigned from zero on every re-analysis, so each concept
+also carries a stable `conceptKey` (`turnConcepts.conceptKey`): a re-analysed
+concept inherits the key of the old concept it overlaps most (Jaccard >= 0.5,
+matched greedily), and anything new gets a fresh key. `auto` links are still
+deleted and rebuilt on every change — debounced on the send path, forced on
+re-analysis — but the key gives a concept an identity that survives the churn.
 Thresholds were tuned against `eval_concept_links.py`: with
 `all-MiniLM-L6-v2` on short questions, "same topic, different wording" pairs
 land around 0.55-0.65 while the nearest false positives sit below 0.48.
@@ -165,7 +168,9 @@ Everything is saved locally in `conversationTree.db` (`SQLite`, WAL mode):
   environment default
 - `turns`
 - `semanticEdges` — each edge carries an `origin` of `auto` (classifier) or `manual` (hand-created via `POST /edges`)
-- `turnConcepts`
+- `turnConcepts` — `conceptKey` is a stable per-concept identity carried across
+  re-analysis by turn overlap; the integer `conceptId` is only a within-
+  conversation label
 - `conceptLinks` — similarity links between two concepts in *different*
   conversations; the pair is stored once in a canonical order, with an `origin`
   of `auto` (rebuilt on every change) or `manual`
@@ -280,6 +285,7 @@ Semantics:
     {
       "conversationId": 1,
       "conceptId": 0,
+      "conceptKey": "9f2c…",
       "label": "what are the key characteristics of cats",
       "turnCount": 2,
       "conversationTitle": "Cats"
@@ -561,9 +567,8 @@ Planned work:
 
 Planned work:
 
-- give concepts a stable identity (a key carried through re-analysis by member
-  overlap) so links survive reclassification and manual concept links become
-  possible — `POST` / `DELETE /concept-links`
+- use the stable `conceptKey` to key `conceptLinks` and support manual concept
+  links — `POST` / `DELETE /concept-links`
 - name concepts from top terms rather than the first question
 - score concepts against each other with the cross-encoder, not just embeddings
 - a real layout for the workspace map (edges currently cross freely between

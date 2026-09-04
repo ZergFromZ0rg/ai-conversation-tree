@@ -9,6 +9,7 @@ from db import (
     deleteConversation,
     deleteEdge,
     getAllConceptMembers,
+    getConceptMembership,
     getConversation,
     getConversationTurns,
     getEdge,
@@ -23,7 +24,12 @@ from db import (
     setConversationModel,
     updateEdge,
 )
-from conceptIndex import conceptLabelsFromMembers, forgetConversation, maybeRelinkConcepts
+from conceptIndex import (
+    conceptLabelsFromMembers,
+    forgetConversation,
+    matchConceptKeys,
+    maybeRelinkConcepts,
+)
 from graphService import addTurn, reclassifyTurns
 from graphStore import invalidate, lockedGraph
 
@@ -346,12 +352,16 @@ def listConceptGraph() -> dict:
     members = getAllConceptMembers()
     labels = conceptLabelsFromMembers(members)
     turnCounts = _conceptTurnCounts(members)
+    conceptKeys = {
+        (row["conversationId"], row["conceptId"]): row["conceptKey"] for row in members
+    }
     titles = {conversation["id"]: conversation["title"] for conversation in listConversations()}
 
     nodes = [
         {
             "conversationId": conversationId,
             "conceptId": conceptId,
+            "conceptKey": conceptKeys.get((conversationId, conceptId)),
             "label": label,
             "turnCount": turnCounts.get((conversationId, conceptId), 0),
             "conversationTitle": titles.get(conversationId),
@@ -428,7 +438,15 @@ def processChatMessage(conversationId: int, userText: str, model: str | None = N
 
 def analyzeConversation(conversationId: int) -> dict:
     with lockedGraph(conversationId) as graph:
+        oldMembership, oldKeys = getConceptMembership(conversationId)
+
         rebuiltTurns = reclassifyTurns(graph)
+
+        newMembership: dict[int, set[int]] = {}
+        for turn in rebuiltTurns:
+            for conceptId in turn.conceptIds:
+                newMembership.setdefault(conceptId, set()).add(turn.id)
+        conceptKeyByConceptId = matchConceptKeys(oldMembership, oldKeys, newMembership)
 
         applyReclassification(
             conversationId,
@@ -441,6 +459,7 @@ def analyzeConversation(conversationId: int) -> dict:
                 (turn.id, turn.root, turn.timelineParent, turn.conceptIds)
                 for turn in rebuiltTurns
             ],
+            conceptKeyByConceptId,
         )
 
         payload = buildConversationPayload(conversationId)

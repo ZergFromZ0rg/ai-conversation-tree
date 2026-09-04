@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import struct
+import uuid
 from pathlib import Path
 
 
@@ -59,6 +60,7 @@ def initDb():
                 conversationId INTEGER NOT NULL,
                 turnId INTEGER NOT NULL,
                 conceptId INTEGER NOT NULL,
+                conceptKey TEXT,
                 FOREIGN KEY (conversationId) REFERENCES conversations(id) ON DELETE CASCADE
             );
 
@@ -131,6 +133,25 @@ def initDb():
         }
         if "embeddingJson" in embeddingColumns:
             _migrateJsonEmbeddingsToBlob(connection)
+
+        # Migrate databases created before turnConcepts.conceptKey existed.
+        # Backfill one stable key per distinct (conversationId, conceptId).
+        turnConceptColumns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(turnConcepts)").fetchall()
+        }
+        if "conceptKey" not in turnConceptColumns:
+            connection.execute("ALTER TABLE turnConcepts ADD COLUMN conceptKey TEXT")
+        for row in connection.execute(
+            "SELECT DISTINCT conversationId, conceptId FROM turnConcepts WHERE conceptKey IS NULL"
+        ).fetchall():
+            connection.execute(
+                """
+                UPDATE turnConcepts SET conceptKey = ?
+                WHERE conversationId = ? AND conceptId = ? AND conceptKey IS NULL
+                """,
+                (uuid.uuid4().hex, row["conversationId"], row["conceptId"]),
+            )
 
         connection.commit()
     finally:
@@ -343,15 +364,49 @@ def saveSemanticEdges(conversationId: int, toTurnId: int, semanticParents: list[
         connection.close()
 
 
+def conceptKeyMap(conversationId: int) -> dict[int, str]:
+    """Current conceptId -> stable conceptKey for one conversation."""
+    connection = getConnection()
+    try:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT conceptId, conceptKey
+            FROM turnConcepts
+            WHERE conversationId = ? AND conceptKey IS NOT NULL
+            """,
+            (conversationId,),
+        ).fetchall()
+    finally:
+        connection.close()
+    return {int(row["conceptId"]): row["conceptKey"] for row in rows}
+
+
 def saveConceptIds(conversationId: int, turnId: int, conceptIds: list[int]):
     connection = getConnection()
     try:
+        keyByConceptId = {
+            int(row["conceptId"]): row["conceptKey"]
+            for row in connection.execute(
+                "SELECT DISTINCT conceptId, conceptKey FROM turnConcepts "
+                "WHERE conversationId = ? AND conceptKey IS NOT NULL",
+                (conversationId,),
+            ).fetchall()
+        }
+        rows = []
+        for conceptId in conceptIds:
+            key = keyByConceptId.get(conceptId)
+            if key is None:
+                # A root turn introduces a brand-new concept; inheriting turns
+                # reuse the key already on that concept's earlier members.
+                key = uuid.uuid4().hex
+                keyByConceptId[conceptId] = key
+            rows.append((conversationId, turnId, conceptId, key))
         connection.executemany(
             """
-            INSERT INTO turnConcepts (conversationId, turnId, conceptId)
-            VALUES (?, ?, ?)
+            INSERT INTO turnConcepts (conversationId, turnId, conceptId, conceptKey)
+            VALUES (?, ?, ?, ?)
             """,
-            [(conversationId, turnId, conceptId) for conceptId in conceptIds],
+            rows,
         )
         connection.commit()
     finally:
@@ -362,12 +417,16 @@ def applyReclassification(
     conversationId: int,
     edges: list[tuple[int, int, str, float]],
     turnMetadata: list[tuple[int, bool, int | None, list[int]]],
+    conceptKeyByConceptId: dict[int, str],
 ) -> None:
     """Persist a full reanalysis of one conversation in a single transaction.
 
     Rebuilds the classifier-owned ('auto') edges and every turn's root /
     timelineParent / concept assignments. Hand-created ('manual') edges are
-    left in place. All-or-nothing: a failure rolls the whole thing back.
+    left in place. Every reassigned conceptId is written with the stable
+    conceptKey the caller resolved for it (inherited by turn-overlap where a
+    concept survived the re-analysis, freshly minted otherwise). All-or-nothing:
+    a failure rolls the whole thing back.
     """
     connection = getConnection()
     try:
@@ -402,10 +461,13 @@ def applyReclassification(
             if conceptIds:
                 connection.executemany(
                     """
-                    INSERT INTO turnConcepts (conversationId, turnId, conceptId)
-                    VALUES (?, ?, ?)
+                    INSERT INTO turnConcepts (conversationId, turnId, conceptId, conceptKey)
+                    VALUES (?, ?, ?, ?)
                     """,
-                    [(conversationId, turnId, conceptId) for conceptId in conceptIds],
+                    [
+                        (conversationId, turnId, conceptId, conceptKeyByConceptId[conceptId])
+                        for conceptId in conceptIds
+                    ],
                 )
         connection.commit()
     except Exception:
@@ -528,6 +590,7 @@ def getAllConceptMembers() -> list[dict]:
             SELECT
                 turnConcepts.conversationId,
                 turnConcepts.conceptId,
+                turnConcepts.conceptKey,
                 turnConcepts.turnId,
                 turns.userText,
                 turns.root,
@@ -549,6 +612,7 @@ def getAllConceptMembers() -> list[dict]:
         {
             "conversationId": int(row["conversationId"]),
             "conceptId": int(row["conceptId"]),
+            "conceptKey": row["conceptKey"],
             "turnId": int(row["turnId"]),
             "userText": str(row["userText"]),
             "root": bool(row["root"]),
@@ -556,6 +620,31 @@ def getAllConceptMembers() -> list[dict]:
         }
         for row in rows
     ]
+
+
+def getConceptMembership(conversationId: int) -> tuple[dict[int, set[int]], dict[int, str]]:
+    """One conversation's current concept partition and its stable keys.
+
+    Returns ({conceptId: {turnId, ...}}, {conceptId: conceptKey}). Read before a
+    re-analysis so the new partition can inherit keys by turn overlap.
+    """
+    connection = getConnection()
+    try:
+        rows = connection.execute(
+            "SELECT turnId, conceptId, conceptKey FROM turnConcepts WHERE conversationId = ?",
+            (conversationId,),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    membership: dict[int, set[int]] = {}
+    keys: dict[int, str] = {}
+    for row in rows:
+        conceptId = int(row["conceptId"])
+        membership.setdefault(conceptId, set()).add(int(row["turnId"]))
+        if row["conceptKey"] is not None:
+            keys[conceptId] = row["conceptKey"]
+    return membership, keys
 
 
 def listConversationEdges(conversationId: int) -> list[dict]:

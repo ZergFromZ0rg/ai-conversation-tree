@@ -14,6 +14,7 @@ and rebuilds every 'auto' row touching it.
 import logging
 import re
 import time
+import uuid
 
 import numpy as np
 
@@ -40,7 +41,51 @@ minSubstantiveTokens = 4
 # Longest concept label before it is trimmed on a word boundary.
 maxLabelChars = 60
 
+# Minimum turn-overlap (Jaccard) for a re-analysed concept to keep an old
+# concept's key rather than be treated as new.
+minKeyMatchJaccard = 0.5
+
 _wordPattern = re.compile(r"[a-z0-9]{2,}")
+
+
+def matchConceptKeys(
+    oldMembership: dict[int, set[int]],
+    oldKeys: dict[int, str],
+    newMembership: dict[int, set[int]],
+) -> dict[int, str]:
+    """Assign a stable key to every concept in a freshly re-analysed conversation.
+
+    A new concept inherits an old concept's key when their turn sets overlap
+    enough (Jaccard >= minKeyMatchJaccard), matched greedily by overlap so each
+    old key is reused at most once. Everything unmatched gets a fresh key. This
+    is what lets a concept — and anything that references it — survive the
+    conceptId reshuffle that every re-analysis performs.
+    """
+    candidates = []
+    for newId, newTurns in newMembership.items():
+        for oldId, oldTurns in oldMembership.items():
+            if oldId not in oldKeys:
+                continue
+            intersection = len(newTurns & oldTurns)
+            if intersection == 0:
+                continue
+            jaccard = intersection / len(newTurns | oldTurns)
+            candidates.append((jaccard, newId, oldId))
+
+    candidates.sort(reverse=True)
+    usedNew: set[int] = set()
+    usedOld: set[int] = set()
+    keyByNewConceptId: dict[int, str] = {}
+    for jaccard, newId, oldId in candidates:
+        if jaccard < minKeyMatchJaccard or newId in usedNew or oldId in usedOld:
+            continue
+        keyByNewConceptId[newId] = oldKeys[oldId]
+        usedNew.add(newId)
+        usedOld.add(oldId)
+
+    for newId in newMembership:
+        keyByNewConceptId.setdefault(newId, uuid.uuid4().hex)
+    return keyByNewConceptId
 
 
 def _isSubstantive(userText: str) -> bool:
