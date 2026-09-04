@@ -15,6 +15,8 @@ async function apiRequest(path, init) {
 export const api = {
   listConversations: () => apiRequest("/conversations"),
   listModels: () => apiRequest("/models"),
+  listOllamaLibrary: () => apiRequest("/ollama/library"),
+  pullOllamaModel: (model) => streamEvents("/ollama/pull", { model }),
   createConversation: (title, model) =>
     apiRequest("/conversations", {
       method: "POST",

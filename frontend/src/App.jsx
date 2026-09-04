@@ -107,15 +107,19 @@ export function App() {
     });
   }, [loadConversations]);
 
-  useEffect(() => {
-    void api
-      .listModels()
-      .then((payload) => {
-        setModels(payload.models);
-        setSelectedModel((current) => current ?? payload.default ?? null);
-      })
-      .catch(() => setModels([]));
+  const refreshModels = useCallback(async () => {
+    try {
+      const payload = await api.listModels();
+      setModels(payload.models);
+      setSelectedModel((current) => current ?? payload.default ?? null);
+    } catch {
+      setModels([]);
+    }
   }, []);
+
+  useEffect(() => {
+    void refreshModels();
+  }, [refreshModels]);
 
   useEffect(() => {
     try {
@@ -318,7 +322,12 @@ export function App() {
       ) : null}
 
       {settingsOpen ? (
-        <SettingsModal apiKeys={apiKeys} onSave={saveApiKeys} onClose={() => setSettingsOpen(false)} />
+        <SettingsModal
+          apiKeys={apiKeys}
+          onSave={saveApiKeys}
+          onClose={() => setSettingsOpen(false)}
+          onModelsChanged={refreshModels}
+        />
       ) : null}
     </div>
   );

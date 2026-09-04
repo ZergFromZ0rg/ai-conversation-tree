@@ -22,8 +22,10 @@ from chatService import (
     listConversationGraph,
     listConversationSessions,
     listConversationTurns,
+    listOllamaLibrary,
     patchConversationEdge,
     processChatMessage,
+    pullOllamaModel,
     removeConceptLink,
     removeConversationEdge,
     setConversationSessionModel,
@@ -98,6 +100,10 @@ class CreateConceptLinkRequest(BaseModel):
     kind: str = "related"
 
 
+class PullOllamaModelRequest(BaseModel):
+    model: str = Field(min_length=1)
+
+
 @app.get("/")
 def root():
     return {
@@ -105,6 +111,8 @@ def root():
         "endpoints": [
             "GET /ui",
             "GET /models",
+            "GET /ollama/library",
+            "POST /ollama/pull",
             "POST /conversations",
             "GET /conversations",
             "GET /conversations/{conversationId}",
@@ -149,6 +157,23 @@ def ui():
 @app.get("/models")
 def getModels():
     return listAvailableModels()
+
+
+@app.get("/ollama/library")
+def getOllamaLibrary():
+    return listOllamaLibrary()
+
+
+@app.post("/ollama/pull")
+def pullOllama(req: PullOllamaModelRequest):
+    def events():
+        try:
+            for progress in pullOllamaModel(req.model):
+                yield f"data: {json.dumps(progress)}\n\n"
+        except (httpx.HTTPError, RuntimeError) as error:
+            yield f"data: {json.dumps({'status': 'error', 'message': str(error)})}\n\n"
+
+    return StreamingResponse(events(), media_type="text/event-stream")
 
 
 @app.post("/conversations", status_code=status.HTTP_201_CREATED)

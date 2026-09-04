@@ -385,6 +385,62 @@ def streamAiText(userText: str, modelSpec: str | None = None, apiKey: str | None
     raise RuntimeError(f"Unknown model provider: {provider!r}. Expected one of {list(KNOWN_PROVIDERS)}.")
 
 
+# A small curated set of models worth offering as one-click downloads —
+# Ollama has no API for browsing its library, only for pulling a name you
+# already know, so this is a hand-picked list rather than something fetched.
+OLLAMA_LIBRARY = [
+    {"name": "llama3.2:1b", "sizeLabel": "~1.3 GB"},
+    {"name": "llama3.2:3b", "sizeLabel": "~2.0 GB"},
+    {"name": "qwen2.5:1.5b", "sizeLabel": "~1.0 GB"},
+    {"name": "qwen2.5:3b", "sizeLabel": "~1.9 GB"},
+    {"name": "phi3:mini", "sizeLabel": "~2.3 GB"},
+    {"name": "gemma2:2b", "sizeLabel": "~1.6 GB"},
+    {"name": "mistral:7b", "sizeLabel": "~4.1 GB"},
+]
+
+
+def listOllamaLibrary() -> dict:
+    installed = set()
+    ollamaReachable = False
+    try:
+        response = httpx.get(f"{ollamaBaseUrl()}/api/tags", timeout=2.0)
+        response.raise_for_status()
+        ollamaReachable = True
+        installed = {entry.get("name") for entry in response.json().get("models", [])}
+    except Exception:
+        pass
+
+    return {
+        "ollamaReachable": ollamaReachable,
+        "models": [entry for entry in OLLAMA_LIBRARY if entry["name"] not in installed],
+    }
+
+
+def pullOllamaModel(model: str):
+    """Yield Ollama's own pull progress lines as {"status", "completed", "total"}
+    dicts, straight through — Ollama already reports exactly what a progress
+    bar needs (bytes completed/total per layer) so there's nothing to compute,
+    just forward each NDJSON line as it arrives."""
+    with httpx.stream(
+        "POST",
+        f"{ollamaBaseUrl()}/api/pull",
+        json={"model": model, "stream": True},
+        timeout=None,
+    ) as response:
+        response.raise_for_status()
+        for line in response.iter_lines():
+            if not line:
+                continue
+            chunk = json.loads(line)
+            yield {
+                "status": chunk.get("status", ""),
+                "completed": chunk.get("completed"),
+                "total": chunk.get("total"),
+            }
+            if chunk.get("status") == "success":
+                break
+
+
 def listAvailableModels() -> dict:
     options: list[dict] = []
 

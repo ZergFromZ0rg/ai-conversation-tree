@@ -961,6 +961,78 @@ button {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+.settingsDivider {
+  height: 1px;
+  background: var(--border);
+  margin: 2px 0;
+}
+
+.settingsSection {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settingsSectionTitle {
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.settingsSection a {
+  color: var(--accent);
+}
+
+.ollamaLibraryList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ollamaLibraryRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.ollamaLibraryName {
+  font-size: 13px;
+  font-weight: 550;
+  flex-shrink: 0;
+}
+
+.ollamaLibrarySize {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: right;
+  margin-right: 4px;
+}
+
+.ollamaLibraryProgress {
+  flex: 1;
+  font-size: 12px;
+  color: var(--accent);
+  text-align: right;
+  margin-right: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ollamaLibraryProgressError {
+  color: var(--danger);
+}
+
+.ollamaLibraryButton {
+  flex-shrink: 0;
+}
+
 .settingsActions {
   display: flex;
   justify-content: flex-end;
