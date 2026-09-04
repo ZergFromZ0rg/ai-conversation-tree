@@ -7,7 +7,9 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/conversations": "http://127.0.0.1:8000",
-      "/edges": "http://127.0.0.1:8000"
+      "/edges": "http://127.0.0.1:8000",
+      "/models": "http://127.0.0.1:8000",
+      "/concepts": "http://127.0.0.1:8000"
     }
   }
 });

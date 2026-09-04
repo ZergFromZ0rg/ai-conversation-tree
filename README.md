@@ -8,7 +8,8 @@ Current goals:
 
 - validate graph logic
 - persist conversations locally
-- test with local models through `Ollama`
+- test with local models through `Ollama`, switchable per conversation
+- link concepts across separate conversations
 - provide a chat-first viewer with a graph drawer for inspection
 
 This is not intended to be production-ready. It is intended to be technically solid, explainable, and useful as a portfolio project.
@@ -28,9 +29,19 @@ The result is stored as:
 - turns
 - semantic edges
 - concept assignments
+- concept links across conversations
 - embeddings
 
 and rendered as a chat with a graph drawer.
+
+Separately, once a turn lands or a conversation is re-analyzed, every concept in
+that conversation is scored against the concepts of every *other* conversation.
+Close pairs become `conceptLinks`, surfaced in the drawer as "also discussed
+elsewhere" and over `GET /concepts/graph`.
+
+Response generation runs through a stub, a local `Ollama` model, or `OpenAI`.
+The environment sets the default; the UI and API can override it per
+conversation.
 
 ## Core Approach
 
@@ -65,6 +76,28 @@ Current flow:
 At this scale a direct scan is cheap and avoids the concept-centroid layer,
 whose average embedding is a poor representative once a concept has drifted.
 
+### Cross-Conversation Concept Links
+
+A concept is the set of turns that share a `conceptId` inside one conversation.
+`conceptIndex.py` compares concepts *across* conversations:
+
+1. group every turn embedding by `(conversationId, conceptId)` and L2-normalise
+2. score two concepts as the mean of the top-3 pairwise cosine similarities
+   between their member turns — top-k, not max (one stray turn pair should not
+   forge a link) and not the full mean (which dilutes a broad concept)
+3. `>= 0.66` is a `same` link, `>= 0.52` is `related`; cap 3 links per concept
+4. concepts with no turn of at least four distinct word tokens are skipped, so
+   greetings and acknowledgements do not link
+
+Links are disposable. `conceptId`s are reassigned from zero on every
+re-analysis, so after any change to a conversation its `auto` links are deleted
+and rebuilt from scratch (debounced on the send path, forced on re-analysis).
+Thresholds were tuned against `eval_concept_links.py`: with
+`all-MiniLM-L6-v2` on short questions, "same topic, different wording" pairs
+land around 0.55-0.65 while the nearest false positives sit below 0.48.
+Genuinely adjacent topics the model cannot lift out of the noise floor stay
+unlinked by design.
+
 ### Important Design Principle
 
 Topic identity should dominate continuation decisions.
@@ -83,7 +116,7 @@ Backend:
 - `sentence-transformers`
 - `CrossEncoder`
 - `PyTorch`
-- `Ollama` for local response generation
+- `Ollama` (local) or `OpenAI` for response generation; a stub mode needs neither
 
 Frontend:
 
@@ -101,6 +134,8 @@ Backend:
   - orchestration, provider calls, graph payload serialization
 - `graphService.py`
   - `ConversationGraph` model, classification logic, concept retrieval, reanalysis
+- `conceptIndex.py`
+  - cross-conversation concept scoring, link rebuild, concept labels
 - `graphStore.py`
   - per-conversation graph cache (LRU) and per-conversation write lock
 - `db.py`
@@ -115,18 +150,24 @@ Frontend (`frontend/src/`):
 - `api.js`
   - fetch wrappers
 - `useConversation.js`
-  - hook owning one conversation's turns + graph and the send / analyze / refresh actions
+  - hook owning one conversation's turns, graph, and concept links, plus the send / analyze / refresh actions
 - `components/`
-  - `ConversationSidebar`, `ChatTranscript`, `Composer`, `GraphRail`, `GraphDrawer`, `TurnGraph`
+  - `ConversationSidebar`, `ChatTranscript`, `Composer` (with the model picker),
+    `GraphRail`, `GraphDrawer` (with the "also discussed elsewhere" panel), `TurnGraph`
 
 ## Persistence Model
 
 Everything is saved locally in `conversationTree.db` (`SQLite`, WAL mode):
 
-- `conversations`
+- `conversations` — `model` column holds the conversation's default response
+  model (`stub`, `ollama:<name>`, or `openai:<name>`); null means use the
+  environment default
 - `turns`
 - `semanticEdges` — each edge carries an `origin` of `auto` (classifier) or `manual` (hand-created via `POST /edges`)
 - `turnConcepts`
+- `conceptLinks` — similarity links between two concepts in *different*
+  conversations; the pair is stored once in a canonical order, with an `origin`
+  of `auto` (rebuilt on every change) or `manual`
 - `turnEmbeddings` — one `float32` vector per turn, stored as a `BLOB`
   (`np.frombuffer` / `.tobytes()`), not JSON text
 
@@ -137,24 +178,46 @@ not re-read the whole history. This assumes a single backend process (one
 
 ## API
 
+### Model Endpoints
+
+- `GET /models` — installed `Ollama` tags (queried live from `/api/tags`), the
+  configured `OpenAI` model, and `stub`, plus the current default and whether
+  `Ollama` is reachable
+
 ### Conversation Endpoints
 
-- `POST /conversations`
+- `POST /conversations` — optional `model` sets the conversation default
 - `GET /conversations`
 - `GET /conversations/{conversationId}`
+- `PATCH /conversations/{conversationId}` — set the conversation's default
+  response model (`{"model": "ollama:<name>"}`); validated against the same
+  `stub` / `ollama:<name>` / `openai:<name>` shape
 - `DELETE /conversations/{conversationId}`
 
 ### Turn Endpoints
 
-- `POST /conversations/{conversationId}/turns`
+- `POST /conversations/{conversationId}/turns` — optional `model` overrides the
+  provider for this turn and becomes the conversation's new default; a provider
+  failure returns `502`
 - `GET /conversations/{conversationId}/turns`
 
 ### Graph Endpoints
 
 - `POST /conversations/{conversationId}/analyze` — recomputes the classifier
   (`auto`) edges and every turn's root / concept assignments in a single
-  transaction; `manual` edges are left in place
+  transaction; `manual` edges are left in place, then concept links are rebuilt
 - `GET /conversations/{conversationId}/graph`
+- `GET /conversations/{conversationId}/concept-links` — this conversation's
+  concepts, each grouped with the other conversations/concepts it links to
+  (label, title, score, `same` / `related`); shaped for the drawer
+
+### Concept Link Endpoints
+
+- `GET /concepts/graph` — the whole workspace: every concept a node
+  (`conversationId`, `conceptId`, `label`, `turnCount`, `conversationTitle`),
+  every link an edge (`a`, `b`, `score`, `kind`, `origin`)
+- `POST /concepts/relink` — rebuild every conversation's `auto` concept links
+  (for a threshold change or to repair drift); returns `{"linkCount": n}`
 
 ### Edge Correction Endpoints
 
@@ -208,10 +271,40 @@ Semantics:
 - blue bidirectional edge = `related`
 - orange node border = `root`
 
+`GET /concepts/graph` returns the cross-conversation view:
+
+```json
+{
+  "nodes": [
+    {
+      "conversationId": 1,
+      "conceptId": 0,
+      "label": "what are the key characteristics of cats",
+      "turnCount": 2,
+      "conversationTitle": "Cats"
+    }
+  ],
+  "edges": [
+    {
+      "a": { "conversationId": 1, "conceptId": 0 },
+      "b": { "conversationId": 4, "conceptId": 2 },
+      "score": 0.71,
+      "kind": "same",
+      "origin": "auto"
+    }
+  ]
+}
+```
+
 ## Interface
 
 The viewer at `/ui` is a normal chat: a conversation list on the left, the
 transcript in the middle, a composer at the bottom.
+
+The composer has a model picker populated from `GET /models`. Choosing a model
+sends it with each turn and stores it as the conversation's default; a new chat
+inherits the current selection, and switching conversations adopts that
+conversation's stored model. The last choice is kept in `localStorage`.
 
 The graph lives in a drawer on the right:
 
@@ -221,6 +314,9 @@ The graph lives in a drawer on the right:
   branch and related links are drawn as secondary curves
 - clicking a graph node scrolls the transcript to that turn and highlights it
 - the drawer header has `Refresh` and `Reanalyze`
+- below the graph, an "also discussed elsewhere" panel lists the other
+  conversations that share the selected turn's concept(s); each is a button that
+  switches to that conversation
 
 The UI follows the browser's light/dark preference. It does not stream replies
 token by token yet.
@@ -244,7 +340,14 @@ npm run build
 cd ..
 ```
 
-### 3. Choose a response mode
+### 3. Choose a default response mode
+
+These environment variables set the *default* provider. Any conversation can
+override it from the composer's model picker, `PATCH /conversations/{id}`, or a
+`model` field on `POST .../turns`; `GET /models` lists what is available.
+
+Resolution order when a conversation has no stored model: `OLLAMA_MODEL`, then
+`AI_CONVERSATION_TREE_STUB_LLM=1`, then `OPENAI_API_KEY`.
 
 #### Stub mode
 
@@ -287,7 +390,7 @@ For frontend development, run the backend on `:8000` and Vite separately:
 
 ```bash
 cd frontend
-npm run dev   # http://127.0.0.1:5173, proxies /conversations and /edges to :8000
+npm run dev   # http://127.0.0.1:5173, proxies /conversations /edges /models /concepts to :8000
 ```
 
 ## Local Workflow
@@ -320,10 +423,27 @@ curl -X POST http://127.0.0.1:8000/conversations/1/turns \
   -d '{"userText":"What are cats?"}'
 ```
 
+### Add a turn with a specific model
+
+```bash
+curl http://127.0.0.1:8000/models
+
+curl -X POST http://127.0.0.1:8000/conversations/1/turns \
+  -H "Content-Type: application/json" \
+  -d '{"userText":"What are cats?","model":"ollama:qwen2.5:0.5b"}'
+```
+
 ### Get the graph
 
 ```bash
 curl http://127.0.0.1:8000/conversations/1/graph
+```
+
+### Get the cross-conversation concept graph
+
+```bash
+curl http://127.0.0.1:8000/concepts/graph
+curl http://127.0.0.1:8000/conversations/1/concept-links
 ```
 
 ### Reanalyze a conversation
@@ -337,7 +457,7 @@ curl -X POST http://127.0.0.1:8000/conversations/1/analyze
 Backend syntax:
 
 ```bash
-venv/bin/python -m py_compile api.py chatService.py graphService.py graphStore.py db.py models.py
+venv/bin/python -m py_compile api.py chatService.py graphService.py conceptIndex.py graphStore.py db.py models.py
 ```
 
 Persistence milestone:
@@ -346,12 +466,17 @@ Persistence milestone:
 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 venv/bin/python testSqliteMilestone.py
 ```
 
-Classifier evaluation scripts:
+Evaluation scripts:
 
 ```bash
 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 venv/bin/python eval_immediate_previous.py
 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 venv/bin/python eval_cross_links.py
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 venv/bin/python eval_concept_links.py
 ```
+
+`eval_immediate_previous.py` and `eval_cross_links.py` cover in-conversation
+classification; `eval_concept_links.py` builds small conversations in throwaway
+databases and checks which ones end up cross-linked.
 
 Frontend build:
 
@@ -362,6 +487,13 @@ cd frontend && npm run build
 ## Current Limitations
 
 - older-turn retrieval is a brute-force cosine scan over every prior turn's embedding in Python (fine at this scale)
+- concept linking rebuilds a workspace-wide embedding map on every change and
+  scores every concept pair; brute force, single process, fine locally
+- `same` vs `related` is a two-threshold heuristic; `all-MiniLM-L6-v2` cannot
+  reliably separate genuinely adjacent topics from noise, so recall is
+  conservative
+- `conceptId`s are reassigned on every re-analysis, so concept links are always
+  `auto` and rebuilt; manual concept links are not supported yet
 - local `Ollama` latency depends heavily on hardware and model size
 - the in-memory graph cache assumes a single backend process (one `uvicorn` worker)
 - replies are not streamed token by token
@@ -393,7 +525,9 @@ Planned work:
 
 Local `SQLite` is correct for a proof of concept. A hosted version would move to
 `Postgres` + `pgvector` for real concurrency, a proper migration path, and
-database-side approximate-nearest-neighbour search over the embeddings.
+database-side approximate-nearest-neighbour search over the embeddings — used
+both by older-turn retrieval and by cross-conversation concept scoring, which
+today rebuild their similarity comparisons in Python on every change.
 
 ### Retrieval Improvements
 
@@ -416,6 +550,18 @@ Planned work:
 - improve branch detection for clarification subthreads
 - add better handling for malformed or low-quality assistant replies
 - make confidence scores more interpretable
+
+### Concept Links
+
+Planned work:
+
+- give concepts a stable identity (a key carried through re-analysis by member
+  overlap) so links survive reclassification and manual concept links become
+  possible — `POST` / `DELETE /concept-links`
+- a workspace map view rendering `GET /concepts/graph` with `React Flow`,
+  clustered by conversation
+- name concepts from top terms rather than the first question
+- score concepts against each other with the cross-encoder, not just embeddings
 
 ### UI / Product Improvements
 
