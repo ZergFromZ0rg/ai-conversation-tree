@@ -31,6 +31,7 @@ export const api = {
   getGraph: (conversationId) => apiRequest(`/conversations/${conversationId}/graph`),
   getConceptLinks: (conversationId) =>
     apiRequest(`/conversations/${conversationId}/concept-links`),
+  getConceptGraph: () => apiRequest("/concepts/graph"),
   sendTurn: (conversationId, userText, model) =>
     apiRequest(`/conversations/${conversationId}/turns`, {
       method: "POST",

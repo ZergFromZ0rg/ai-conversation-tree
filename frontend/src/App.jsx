@@ -6,6 +6,7 @@ import { ChatTranscript } from "./components/ChatTranscript";
 import { Composer } from "./components/Composer";
 import { GraphRail } from "./components/GraphRail";
 import { GraphDrawer } from "./components/GraphDrawer";
+import { WorkspaceMap } from "./components/WorkspaceMap";
 
 const DRAWER_STORAGE_KEY = "act.drawerOpen";
 const MODEL_STORAGE_KEY = "act.model";
@@ -32,6 +33,7 @@ export function App() {
   const [selectedTurnId, setSelectedTurnId] = useState(null);
   const [drawerOpen, setDrawerOpen] = useState(readDrawerPreference);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [mapOpen, setMapOpen] = useState(false);
   const [models, setModels] = useState([]);
   const [selectedModel, setSelectedModel] = useState(readModelPreference);
 
@@ -173,6 +175,13 @@ export function App() {
             {activeConversation?.title || (conversationId ? `Conversation ${conversationId}` : "AI Conversation Tree")}
           </span>
           {status === "error" ? <span className="chatError">Something went wrong</span> : null}
+          <button
+            type="button"
+            className="ghostButton chatHeaderMap"
+            onClick={() => setMapOpen(true)}
+          >
+            Map
+          </button>
         </header>
 
         <ChatTranscript
@@ -214,6 +223,10 @@ export function App() {
       ) : (
         <GraphRail turnCount={turnCount} threadCount={threadCount} onOpen={() => setDrawerOpen(true)} />
       )}
+
+      {mapOpen ? (
+        <WorkspaceMap onClose={() => setMapOpen(false)} onOpenConversation={selectConversation} />
+      ) : null}
     </div>
   );
 }
