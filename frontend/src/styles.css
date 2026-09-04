@@ -1,18 +1,20 @@
 :root {
   --bg: #ffffff;
-  --bg-elevated: #f7f7f8;
-  --bg-hover: #ececee;
-  --bg-user-msg: #f3f3f5;
+  --bg-elevated: #f7f8f7;
+  --bg-hover: #ecefec;
+  --bg-user-msg: #f2f4f2;
   --text: #1f2023;
   --text-muted: #6b6f76;
-  --border: #e5e5e7;
-  --border-strong: #d4d4d7;
-  --accent: #4f46e5;
+  --border: #e4e7e4;
+  --border-strong: #d2d7d2;
+  --accent: #16a34a;
+  --accent-strong: #0f7c38;
+  --accent-soft: #e8f6ee;
   --accent-contrast: #ffffff;
   --danger: #dc2626;
-  --selected-ring: rgba(79, 70, 229, 0.45);
+  --selected-ring: rgba(22, 163, 74, 0.4);
   --graph-label-bg: #ffffff;
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 8px 24px rgba(0, 0, 0, 0.08);
+  --shadow: 0 1px 2px rgba(20, 40, 30, 0.05), 0 8px 24px rgba(20, 40, 30, 0.08);
   --transcript-width: 48rem;
   --sidebar-width: 260px;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -20,19 +22,21 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #1a1a1c;
-    --bg-elevated: #202022;
-    --bg-hover: #2c2c2f;
-    --bg-user-msg: #29292c;
+    --bg: #17191b;
+    --bg-elevated: #1d2021;
+    --bg-hover: #262a29;
+    --bg-user-msg: #23302a;
     --text: #ececed;
-    --text-muted: #9a9ba1;
-    --border: #313135;
-    --border-strong: #3d3d42;
-    --accent: #7c74f0;
-    --accent-contrast: #12121a;
+    --text-muted: #9aa3a0;
+    --border: #2b302e;
+    --border-strong: #383f3c;
+    --accent: #34d399;
+    --accent-strong: #6ee7b7;
+    --accent-soft: rgba(52, 211, 153, 0.12);
+    --accent-contrast: #0b1a12;
     --danger: #f87171;
-    --selected-ring: rgba(124, 116, 240, 0.5);
-    --graph-label-bg: #0f0f12;
+    --selected-ring: rgba(52, 211, 153, 0.45);
+    --graph-label-bg: #0f1211;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 32px rgba(0, 0, 0, 0.5);
   }
 }
@@ -59,6 +63,32 @@ body {
 button {
   font-family: inherit;
   cursor: pointer;
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 /* ---------- shell ---------- */
@@ -90,8 +120,16 @@ button {
 }
 
 .sidebarBrand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-weight: 650;
   font-size: 14px;
+}
+
+.sidebarBrandMark {
+  flex-shrink: 0;
+  color: var(--accent);
 }
 
 .sidebarCloseButton {
@@ -105,15 +143,22 @@ button {
   width: 100%;
   padding: 9px 12px;
   border: 1px solid var(--border-strong);
-  border-radius: 10px;
+  border-radius: 12px;
   background: var(--bg);
   color: var(--text);
   font-size: 14px;
   font-weight: 550;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
 }
 
 .newChatButton:hover {
   background: var(--bg-hover);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.newChatButton:active {
+  transform: scale(0.98);
 }
 
 .conversationList {
@@ -137,6 +182,7 @@ button {
   align-items: center;
   border-radius: 8px;
   padding-right: 4px;
+  border-left: 2px solid transparent;
 }
 
 .conversationRow:hover {
@@ -144,7 +190,8 @@ button {
 }
 
 .conversationRowActive {
-  background: var(--bg-hover);
+  background: var(--accent-soft);
+  border-left-color: var(--accent);
 }
 
 .conversationRowSelect {
@@ -291,11 +338,15 @@ button {
 }
 
 .message {
-  border-radius: 14px;
+  border-radius: 16px;
   padding: 10px 14px;
   cursor: pointer;
   border: 1px solid transparent;
   transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.message:hover {
+  border-color: var(--border-strong);
 }
 
 .message--user {
@@ -419,10 +470,16 @@ button {
   align-items: flex-end;
   gap: 8px;
   border: 1px solid var(--border-strong);
-  border-radius: 16px;
+  border-radius: 18px;
   padding: 8px 8px 8px 14px;
   background: var(--bg);
   box-shadow: var(--shadow);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.composerBox:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--shadow), 0 0 0 3px var(--accent-soft);
 }
 
 .composerInput {
@@ -454,6 +511,15 @@ button {
   color: var(--accent-contrast);
   font-size: 17px;
   line-height: 1;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.composerSend:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.composerSend:active:not(:disabled) {
+  transform: scale(0.94);
 }
 
 .composerSend:disabled {
@@ -836,9 +902,74 @@ button {
   flex-direction: column;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 16px;
   overflow: hidden;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+}
+
+.settingsModal {
+  margin: auto;
+  width: 100%;
+  max-width: 440px;
+  max-height: 90%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+}
+
+.settingsForm {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.settingsHint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.settingsField {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.settingsField input {
+  font: inherit;
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+
+.settingsField input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.settingsActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.settingsSave {
+  width: auto;
 }
 
 .workspaceMapHeader {

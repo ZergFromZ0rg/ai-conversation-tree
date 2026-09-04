@@ -49,8 +49,12 @@ export const api = {
       body: JSON.stringify({ label, confidence }),
     }),
   deleteTurnEdge: (edgeId) => apiRequest(`/edges/${edgeId}`, { method: "DELETE" }),
-  streamTurn: (conversationId, userText, model) =>
-    streamEvents(`/conversations/${conversationId}/turns/stream`, { userText, model: model ?? null }),
+  streamTurn: (conversationId, userText, model, apiKey) =>
+    streamEvents(`/conversations/${conversationId}/turns/stream`, {
+      userText,
+      model: model ?? null,
+      apiKey: apiKey ?? null,
+    }),
   analyze: (conversationId) =>
     apiRequest(`/conversations/${conversationId}/analyze`, { method: "POST" }),
 };

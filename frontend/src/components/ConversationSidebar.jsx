@@ -46,7 +46,27 @@ export function ConversationSidebar({
       <div className={`sidebarBackdrop${isOpen ? " sidebarBackdropVisible" : ""}`} onClick={onClose} />
       <aside className={`sidebar${isOpen ? " sidebarOpen" : ""}`}>
         <div className="sidebarHeader">
-          <span className="sidebarBrand">AI Conversation Tree</span>
+          <span className="sidebarBrand">
+            <svg
+              className="sidebarBrandMark"
+              width="16"
+              height="16"
+              viewBox="0 0 16 16"
+              fill="none"
+              aria-hidden="true"
+            >
+              <circle cx="8" cy="2.5" r="1.6" fill="currentColor" />
+              <circle cx="3" cy="13.5" r="1.6" fill="currentColor" />
+              <circle cx="13" cy="13.5" r="1.6" fill="currentColor" />
+              <path
+                d="M8 4.1V8M8 8L3 11.9M8 8l5 3.9"
+                stroke="currentColor"
+                strokeWidth="1.4"
+                strokeLinecap="round"
+              />
+            </svg>
+            AI Conversation Tree
+          </span>
           <button type="button" className="iconButton sidebarCloseButton" aria-label="Close menu" onClick={onClose}>
             ×
           </button>

@@ -2,6 +2,11 @@ import { useCallback, useMemo, useState } from "react";
 import { Background, Controls, Handle, MarkerType, Position, ReactFlow } from "@xyflow/react";
 import dagre from "@dagrejs/dagre";
 import { api } from "../api";
+import { buildLanePath, edgeTypes as routedEdgeTypes } from "../edgeRouting";
+
+// How far past the widest rank the routing "highway" sits, for edges that
+// skip more than one rank (see buildRankRouting below).
+const HIGHWAY_MARGIN = 60;
 
 const edgeColors = {
   continuation: "#34d399",
@@ -77,6 +82,48 @@ function primaryParentsByNode(nodes, edges) {
   return primaryByNode;
 }
 
+// The y dagre assigns is identical (within float noise) for every node in
+// the same rank when rankdir is TB — round to bucket nodes into ranks and
+// get each rank's y band, mirroring WorkspaceMap's row bands but computed
+// from the layout instead of a fixed grid.
+function buildRankBands(nodeIds, dagreGraph) {
+  const yById = new Map(nodeIds.map((id) => [id, Math.round(dagreGraph.node(id)?.y ?? 0)]));
+  const rankYs = [...new Set(yById.values())].sort((a, b) => a - b);
+  const rankIndexById = new Map([...yById.entries()].map(([id, y]) => [id, rankYs.indexOf(y)]));
+  const rankTops = rankYs.map((y) => y - NODE_HEIGHT / 2);
+  const rankBottoms = rankYs.map((y) => y + NODE_HEIGHT / 2);
+  return { rankIndexById, rankTops, rankBottoms };
+}
+
+// A non-primary edge can span ranks in either direction (dagre only lays out
+// the primary spine, so a "related"/duplicate edge's two turns can land with
+// the semantic target above the semantic source). Route by physical position
+// instead of source/target: whichever endpoint is higher up exits from its
+// bottom band, whichever is lower enters from its top band — the path is
+// still built source-first/target-last so arrowheads stay correct.
+function buildRankRouting(sourceId, targetId, positionsById, rankIndexById, rankTops, rankBottoms, highwayX, jitter) {
+  const source = positionsById.get(sourceId);
+  const target = positionsById.get(targetId);
+  const sourceRank = rankIndexById.get(sourceId);
+  const targetRank = rankIndexById.get(targetId);
+  if (!source || !target || sourceRank === targetRank) {
+    return null;
+  }
+
+  const laneBelow = (rank) => (rankBottoms[rank] + rankTops[rank + 1]) / 2;
+  const laneAbove = (rank) => (rankTops[rank] + rankBottoms[rank - 1]) / 2;
+
+  // positionsById holds dagre's *center* coordinates, so the top/bottom edge
+  // of a node is center ± half its height (not ±0 / ±full height).
+  const sourceBelowTarget = sourceRank > targetRank;
+  const sourceExitY = sourceBelowTarget ? source.y - NODE_HEIGHT / 2 : source.y + NODE_HEIGHT / 2;
+  const targetEnterY = sourceBelowTarget ? target.y + NODE_HEIGHT / 2 : target.y - NODE_HEIGHT / 2;
+  const sourceLaneY = sourceBelowTarget ? laneAbove(sourceRank) : laneBelow(sourceRank);
+  const targetLaneY = sourceBelowTarget ? laneBelow(targetRank) : laneAbove(targetRank);
+
+  return buildLanePath(source.x, sourceExitY, sourceLaneY, target.x, targetEnterY, targetLaneY, highwayX, jitter);
+}
+
 function buildFlowLayout(nodes, edges, selectedTurnId, pendingTurnId) {
   const primaryParentByNode = primaryParentsByNode(nodes, edges);
 
@@ -93,6 +140,16 @@ function buildFlowLayout(nodes, edges, selectedTurnId, pendingTurnId) {
     }
   }
   dagre.layout(dagreGraph);
+
+  const nodeIds = nodes.map((node) => String(node.id));
+  const { rankIndexById, rankTops, rankBottoms } = buildRankBands(nodeIds, dagreGraph);
+  const positionsById = new Map(
+    nodeIds.map((id) => {
+      const laidOut = dagreGraph.node(id);
+      return [id, { x: laidOut?.x ?? 0, y: laidOut?.y ?? 0 }];
+    }),
+  );
+  const highwayX = Math.max(...[...positionsById.values()].map((p) => p.x)) + NODE_WIDTH / 2 + HIGHWAY_MARGIN;
 
   const flowNodes = nodes.map((node) => {
     const laidOut = dagreGraph.node(String(node.id));
@@ -123,17 +180,22 @@ function buildFlowLayout(nodes, edges, selectedTurnId, pendingTurnId) {
     ),
   );
 
-  const flowEdges = edges.map((edge) => {
+  const flowEdges = edges.map((edge, index) => {
     const color = edgeColors[edge.label] ?? "#94a3b8";
     const edgeKey = `${edge.fromTurnId}:${edge.toTurnId}:${edge.label}`;
     const isPrimaryEdge = primaryEdgeKeys.has(edgeKey);
     const isBranchLike = edge.label === "branch" || edge.label === "related" || !isPrimaryEdge;
     const isBidirectionalRelated = edge.label === "related";
+    const sourceId = String(edge.fromTurnId);
+    const targetId = String(edge.toTurnId);
+    const routed = isBranchLike
+      ? buildRankRouting(sourceId, targetId, positionsById, rankIndexById, rankTops, rankBottoms, highwayX, index)
+      : null;
     return {
       id: String(edge.id ?? `${edge.fromTurnId}-${edge.toTurnId}-${edge.label}`),
-      source: String(edge.fromTurnId),
-      target: String(edge.toTurnId),
-      type: isBranchLike ? "bezier" : "smoothstep",
+      source: sourceId,
+      target: targetId,
+      type: routed ? "routed" : isBranchLike ? "bezier" : "smoothstep",
       label: `${edge.label} ${edge.confidence.toFixed(2)}${edge.origin === "manual" ? " · pinned" : ""}`,
       data: {
         edgeId: edge.id,
@@ -141,6 +203,9 @@ function buildFlowLayout(nodes, edges, selectedTurnId, pendingTurnId) {
         fromTurnId: edge.fromTurnId,
         toTurnId: edge.toTurnId,
         label: edge.label,
+        path: routed?.d,
+        labelX: routed?.labelX,
+        labelY: routed?.labelY,
       },
       style: {
         stroke: color,
@@ -152,9 +217,12 @@ function buildFlowLayout(nodes, edges, selectedTurnId, pendingTurnId) {
       markerStart: isBidirectionalRelated ? { type: MarkerType.ArrowClosed, color } : undefined,
       markerEnd: { type: MarkerType.ArrowClosed, color },
       zIndex: isPrimaryEdge ? 2 : 1,
-      pathOptions: isBranchLike
-        ? { curvature: edge.label === "branch" ? 0.45 : 0.3 }
-        : { offset: 26, borderRadius: 14 },
+      pathOptions:
+        isBranchLike && !routed
+          ? { curvature: edge.label === "branch" ? 0.45 : 0.3 }
+          : !isBranchLike
+            ? { offset: 26, borderRadius: 14 }
+            : undefined,
     };
   });
 
@@ -301,6 +369,7 @@ export function TurnGraph({ nodes, edges, conversationId, selectedTurnId, onSele
           nodes={flowNodes}
           edges={flowEdges}
           nodeTypes={nodeTypes}
+          edgeTypes={routedEdgeTypes}
           fitView
           fitViewOptions={{ padding: 0.2 }}
           nodesDraggable={false}

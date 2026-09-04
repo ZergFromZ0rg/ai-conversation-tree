@@ -47,7 +47,7 @@ export function useConversation(conversationId) {
   }, [refresh]);
 
   const sendTurn = useCallback(
-    async (rawText, model) => {
+    async (rawText, model, apiKey) => {
       const userText = rawText.trim();
       if (!conversationId || !userText) {
         return;
@@ -56,7 +56,7 @@ export function useConversation(conversationId) {
       setStreamingText("");
       setStatus("sending");
       try {
-        for await (const event of api.streamTurn(conversationId, userText, model)) {
+        for await (const event of api.streamTurn(conversationId, userText, model, apiKey)) {
           if (event.type === "delta") {
             setStreamingText((prev) => prev + event.text);
           } else if (event.type === "error") {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { BaseEdge, Background, Controls, Handle, MarkerType, Position, ReactFlow } from "@xyflow/react";
+import { Background, Controls, Handle, MarkerType, Position, ReactFlow } from "@xyflow/react";
 import { api } from "../api";
+import { buildLanePath, edgeTypes } from "../edgeRouting";
 
 const COLUMNS = 4;
 const COLUMN_WIDTH = 300;
@@ -57,30 +58,6 @@ function ConceptNode({ data }) {
 
 const nodeTypes = { conceptNode: ConceptNode };
 
-// Renders the explicit path buildRoutedPath computed; falls back to nothing
-// (React Flow then just doesn't draw anything for a malformed edge — never
-// hit in practice, buildLayout always supplies a path when this type is used).
-function RoutedEdge({ data, style, label, labelStyle, labelBgStyle, markerStart, markerEnd }) {
-  if (!data?.path) {
-    return null;
-  }
-  return (
-    <BaseEdge
-      path={data.path}
-      style={style}
-      label={label}
-      labelX={data.labelX}
-      labelY={data.labelY}
-      labelStyle={labelStyle}
-      labelBgStyle={labelBgStyle}
-      markerStart={markerStart}
-      markerEnd={markerEnd}
-    />
-  );
-}
-
-const edgeTypes = { routed: RoutedEdge };
-
 // Each row of clusters sits in a "band" of node cards with a genuinely empty
 // horizontal gap (ROW_GAP) above and below it — nothing is ever drawn there.
 // ownLaneY picks the gap adjacent to a given row: below it, or above it for
@@ -131,35 +108,17 @@ function buildRoutedPath(sourceId, targetId, positionsById, metaById, rowTops, r
   const targetCenterX = target.x + NODE_WIDTH / 2;
   const sourceExitY = sourceLane.side === "bottom" ? source.y + NODE_HEIGHT : source.y;
   const targetExitY = targetLane.side === "bottom" ? target.y + NODE_HEIGHT : target.y;
-  const sourceLaneY = sourceLane.y + jitter;
-  const targetLaneY = targetLane.y + jitter;
 
-  if (Math.abs(sourceLaneY - targetLaneY) < 1) {
-    return {
-      d: [
-        `M ${sourceCenterX} ${sourceExitY}`,
-        `L ${sourceCenterX} ${sourceLaneY}`,
-        `L ${targetCenterX} ${targetLaneY}`,
-        `L ${targetCenterX} ${targetExitY}`,
-      ].join(" "),
-      labelX: (sourceCenterX + targetCenterX) / 2,
-      labelY: sourceLaneY,
-    };
-  }
-
-  const highwayX = HIGHWAY_X + jitter;
-  return {
-    d: [
-      `M ${sourceCenterX} ${sourceExitY}`,
-      `L ${sourceCenterX} ${sourceLaneY}`,
-      `L ${highwayX} ${sourceLaneY}`,
-      `L ${highwayX} ${targetLaneY}`,
-      `L ${targetCenterX} ${targetLaneY}`,
-      `L ${targetCenterX} ${targetExitY}`,
-    ].join(" "),
-    labelX: highwayX,
-    labelY: (sourceLaneY + targetLaneY) / 2,
-  };
+  return buildLanePath(
+    sourceCenterX,
+    sourceExitY,
+    sourceLane.y,
+    targetCenterX,
+    targetExitY,
+    targetLane.y,
+    HIGHWAY_X,
+    jitter,
+  );
 }
 
 function buildLayout(graph) {
