@@ -106,6 +106,14 @@ land around 0.55-0.65 while the nearest false positives sit below 0.48.
 Genuinely adjacent topics the model cannot lift out of the noise floor stay
 unlinked by design.
 
+Each concept is labelled by its most distinctive terms — term frequency
+(across the concept's own turns) times inverse concept frequency (rarer
+across the workspace scores higher), using a label-specific stopword list
+(`conceptIndex._labelStopwords`, broader than the classifier's own) — rather
+than by its first question verbatim, so "python, decorator" instead of "how
+do decorators work in python". A concept with no content terms at all (a
+greeting) falls back to that trimmed first question.
+
 ### Important Design Principle
 
 Topic identity should dominate continuation decisions.
@@ -313,7 +321,7 @@ Semantics:
       "conversationId": 1,
       "conceptId": 0,
       "conceptKey": "9f2c…",
-      "label": "what are the key characteristics of cats",
+      "label": "characteristic, key, cat",
       "turnCount": 2,
       "conversationTitle": "Cats"
     }
@@ -631,7 +639,6 @@ Planned work:
 
 Planned work:
 
-- name concepts from top terms rather than the first question
 - score concepts against each other with the cross-encoder, not just embeddings
 - filtering the workspace map to linked concepts only
 

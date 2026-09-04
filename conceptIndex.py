@@ -14,7 +14,9 @@ replaceAutoConceptLinks); the key is what lets a 'manual' link keep pointing at
 the same concept across a reanalysis.
 """
 
+from collections import Counter
 import logging
+import math
 import re
 import time
 import uuid
@@ -41,14 +43,49 @@ maxLinksPerConcept = 3
 # eligible — filters out greeting / acknowledgement concepts.
 minSubstantiveTokens = 4
 
-# Longest concept label before it is trimmed on a word boundary.
+# Longest concept label before it is trimmed on a word boundary (fallback
+# labels only — see conceptLabelsFromMembers).
 maxLabelChars = 60
+
+# How many top terms make up a concept's label.
+conceptLabelTermCount = 3
 
 # Minimum turn-overlap (Jaccard) for a re-analysed concept to keep an old
 # concept's key rather than be treated as new.
 minKeyMatchJaccard = 0.5
 
 _wordPattern = re.compile(r"[a-z0-9]{2,}")
+
+# General-purpose English stopwords for label extraction — deliberately
+# separate from graphService.stopwords, which is a short list scoped to that
+# module's discourse-marker heuristics (mostly question words), not broad
+# enough to keep filler out of a "top terms" label.
+_labelStopwords = frozenset(
+    """
+    a an the and or but if then than so of to in on at by for with about
+    against between into through during before after above below from up
+    down out off over under again further once here there when where why
+    how what which who whom this that these those am is are was were be
+    been being have has had having do does did doing will would should
+    could can may might must shall i me my myself we our ours ourselves
+    you your yours yourself yourselves he him his himself she her hers
+    herself it its itself they them their theirs themselves not no nor
+    just also please like want need know explain tell give get make any
+    some all each few more most other such only own same as much many very
+    quite possible really actually maybe perhaps
+    """.split()
+)
+
+
+def _normalizeLabelWord(word: str) -> str:
+    if len(word) > 3 and word.endswith("s"):
+        return word[:-1]
+    return word
+
+
+def _labelTerms(text: str) -> list[str]:
+    words = _wordPattern.findall(text.lower())
+    return [_normalizeLabelWord(word) for word in words if word not in _labelStopwords]
 
 
 def matchConceptKeys(
@@ -104,21 +141,58 @@ def _trimLabel(text: str) -> str:
 
 
 def conceptLabelsFromMembers(members: list[dict]) -> dict[tuple[int, int], str]:
-    """Label each concept by its origin turn's question.
+    """Label each concept by its most distinctive terms.
 
-    Picks the concept's earliest root turn (the turn that created the concept),
-    falling back to its earliest turn, and trims that user message to
-    maxLabelChars on a word boundary.
+    Term frequency (how many of the concept's own turns mention a term) times
+    inverse concept frequency (rarer across the workspace scores higher) picks
+    the top conceptLabelTermCount terms — so "python", not "the"/"how"/"what"
+    (see _labelStopwords; deliberately its own list, not graphService's
+    classifier-scoped one). A concept with no content terms at all (a
+    greeting, an acknowledgement) falls back to its origin turn's question,
+    trimmed to maxLabelChars on a word boundary: the earliest root turn (the
+    turn that created the concept), or its earliest turn if that's missing.
     """
-    best: dict[tuple[int, int], tuple[int, int, str]] = {}
+    textsByKey: dict[tuple[int, int], list[str]] = {}
+    originByKey: dict[tuple[int, int], tuple[int, int, str]] = {}
     for row in members:
         key = (row["conversationId"], row["conceptId"])
+        textsByKey.setdefault(key, []).append(row["userText"])
         # rank 0 = root turn, 1 = inherited; then lowest turnId wins
         candidate = (0 if row["root"] else 1, row["turnId"], row["userText"])
-        current = best.get(key)
+        current = originByKey.get(key)
         if current is None or candidate[:2] < current[:2]:
-            best[key] = candidate
-    return {key: _trimLabel(value[2]) for key, value in best.items()}
+            originByKey[key] = candidate
+
+    termCountsByKey: dict[tuple[int, int], Counter] = {}
+    for key, texts in textsByKey.items():
+        counts: Counter = Counter()
+        for text in texts:
+            counts.update(_labelTerms(text))
+        termCountsByKey[key] = counts
+
+    conceptCountByTerm: Counter = Counter()
+    for counts in termCountsByKey.values():
+        conceptCountByTerm.update(counts.keys())
+    totalConcepts = len(termCountsByKey)
+
+    def score(term: str, count: int) -> float:
+        idf = math.log((totalConcepts + 1) / (conceptCountByTerm[term] + 1)) + 1
+        return count * idf
+
+    labels: dict[tuple[int, int], str] = {}
+    for key, counts in termCountsByKey.items():
+        if not counts:
+            labels[key] = _trimLabel(originByKey[key][2])
+            continue
+
+        topTerms = [
+            term
+            for term, _ in sorted(counts.items(), key=lambda item: score(*item), reverse=True)[
+                :conceptLabelTermCount
+            ]
+        ]
+        labels[key] = ", ".join(topTerms)
+    return labels
 
 
 class ConceptProfile:
