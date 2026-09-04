@@ -519,7 +519,7 @@ def getAllConceptMembers() -> list[dict]:
 
     One row per (turn, conceptId) pair, so a turn assigned to two concepts
     appears twice. Turns without a stored embedding are skipped. Feeds the
-    cross-conversation concept linker.
+    cross-conversation concept linker and concept labelling.
     """
     connection = getConnection()
     try:
@@ -530,6 +530,7 @@ def getAllConceptMembers() -> list[dict]:
                 turnConcepts.conceptId,
                 turnConcepts.turnId,
                 turns.userText,
+                turns.root,
                 turnEmbeddings.embedding
             FROM turnConcepts
             JOIN turns
@@ -550,6 +551,7 @@ def getAllConceptMembers() -> list[dict]:
             "conceptId": int(row["conceptId"]),
             "turnId": int(row["turnId"]),
             "userText": str(row["userText"]),
+            "root": bool(row["root"]),
             "embedding": bytes(row["embedding"]),
         }
         for row in rows

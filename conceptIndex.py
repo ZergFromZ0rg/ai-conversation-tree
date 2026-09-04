@@ -28,11 +28,40 @@ maxLinksPerConcept = 3
 # eligible — filters out greeting / acknowledgement concepts.
 minSubstantiveTokens = 4
 
+# Longest concept label before it is trimmed on a word boundary.
+maxLabelChars = 60
+
 _wordPattern = re.compile(r"[a-z0-9]{2,}")
 
 
 def _isSubstantive(userText: str) -> bool:
     return len(set(_wordPattern.findall(userText.lower()))) >= minSubstantiveTokens
+
+
+def _trimLabel(text: str) -> str:
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= maxLabelChars:
+        return collapsed
+    head = collapsed[:maxLabelChars].rsplit(" ", 1)[0].rstrip()
+    return (head or collapsed[:maxLabelChars].rstrip()) + "…"
+
+
+def conceptLabelsFromMembers(members: list[dict]) -> dict[tuple[int, int], str]:
+    """Label each concept by its origin turn's question.
+
+    Picks the concept's earliest root turn (the turn that created the concept),
+    falling back to its earliest turn, and trims that user message to
+    maxLabelChars on a word boundary.
+    """
+    best: dict[tuple[int, int], tuple[int, int, str]] = {}
+    for row in members:
+        key = (row["conversationId"], row["conceptId"])
+        # rank 0 = root turn, 1 = inherited; then lowest turnId wins
+        candidate = (0 if row["root"] else 1, row["turnId"], row["userText"])
+        current = best.get(key)
+        if current is None or candidate[:2] < current[:2]:
+            best[key] = candidate
+    return {key: _trimLabel(value[2]) for key, value in best.items()}
 
 
 class ConceptProfile:
