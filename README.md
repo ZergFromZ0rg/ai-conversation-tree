@@ -153,7 +153,8 @@ Frontend (`frontend/src/`):
   - hook owning one conversation's turns, graph, and concept links, plus the send / analyze / refresh actions
 - `components/`
   - `ConversationSidebar`, `ChatTranscript`, `Composer` (with the model picker),
-    `GraphRail`, `GraphDrawer` (with the "also discussed elsewhere" panel), `TurnGraph`
+    `GraphRail`, `GraphDrawer` (with the "also discussed elsewhere" panel),
+    `TurnGraph`, `WorkspaceMap`
 
 ## Persistence Model
 
@@ -317,6 +318,11 @@ The graph lives in a drawer on the right:
 - below the graph, an "also discussed elsewhere" panel lists the other
   conversations that share the selected turn's concept(s); each is a button that
   switches to that conversation
+
+The `Map` button in the chat header opens a full-screen workspace map: every
+concept across every conversation as a node, laid out in a grid clustered and
+coloured by conversation, with the cross-conversation concept links as edges.
+Clicking a concept switches to that conversation.
 
 The UI follows the browser's light/dark preference. It does not stream replies
 token by token yet.
@@ -558,10 +564,10 @@ Planned work:
 - give concepts a stable identity (a key carried through re-analysis by member
   overlap) so links survive reclassification and manual concept links become
   possible — `POST` / `DELETE /concept-links`
-- a workspace map view rendering `GET /concepts/graph` with `React Flow`,
-  clustered by conversation
 - name concepts from top terms rather than the first question
 - score concepts against each other with the cross-encoder, not just embeddings
+- a real layout for the workspace map (edges currently cross freely between
+  clusters); filtering it to linked concepts only
 
 ### UI / Product Improvements
 
