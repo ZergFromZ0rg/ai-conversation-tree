@@ -56,6 +56,7 @@ export function GraphDrawer({
   conceptLinks,
   selectedConceptIds,
   onOpenConversation,
+  conversationId,
   turnCount,
   threadCount,
   selectedTurnId,
@@ -91,8 +92,10 @@ export function GraphDrawer({
         <TurnGraph
           nodes={graph.nodes}
           edges={graph.edges}
+          conversationId={conversationId}
           selectedTurnId={selectedTurnId}
           onSelectTurn={onSelectTurn}
+          onChanged={onRefresh}
         />
       </div>
 

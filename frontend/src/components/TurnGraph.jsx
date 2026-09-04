@@ -1,6 +1,7 @@
-import { useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Background, Controls, Handle, MarkerType, Position, ReactFlow } from "@xyflow/react";
 import dagre from "@dagrejs/dagre";
+import { api } from "../api";
 
 const edgeColors = {
   continuation: "#34d399",
@@ -13,6 +14,9 @@ const relationPriority = {
   branch: 1,
   related: 2,
 };
+
+const EDGE_LABELS = ["continuation", "branch", "related"];
+const MANUAL_EDGE_CONFIDENCE = 1.0;
 
 const NODE_WIDTH = 240;
 const NODE_HEIGHT = 92;
@@ -30,6 +34,7 @@ function TurnNode({ data }) {
     "turnNode",
     data.isRoot ? "turnNodeRoot" : "",
     data.isSelected ? "turnNodeSelected" : "",
+    data.isPending ? "turnNodePending" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -72,7 +77,7 @@ function primaryParentsByNode(nodes, edges) {
   return primaryByNode;
 }
 
-function buildFlowLayout(nodes, edges, selectedTurnId) {
+function buildFlowLayout(nodes, edges, selectedTurnId, pendingTurnId) {
   const primaryParentByNode = primaryParentsByNode(nodes, edges);
 
   const dagreGraph = new dagre.graphlib.Graph();
@@ -103,6 +108,7 @@ function buildFlowLayout(nodes, edges, selectedTurnId) {
         preview: truncatePreview(node.userText),
         isRoot: node.root,
         isSelected: node.id === selectedTurnId,
+        isPending: node.id === pendingTurnId,
       },
       draggable: false,
       sourcePosition: Position.Bottom,
@@ -128,7 +134,14 @@ function buildFlowLayout(nodes, edges, selectedTurnId) {
       source: String(edge.fromTurnId),
       target: String(edge.toTurnId),
       type: isBranchLike ? "bezier" : "smoothstep",
-      label: `${edge.label} ${edge.confidence.toFixed(2)}`,
+      label: `${edge.label} ${edge.confidence.toFixed(2)}${edge.origin === "manual" ? " · pinned" : ""}`,
+      data: {
+        edgeId: edge.id,
+        origin: edge.origin,
+        fromTurnId: edge.fromTurnId,
+        toTurnId: edge.toTurnId,
+        label: edge.label,
+      },
       style: {
         stroke: color,
         strokeWidth: edge.label === "continuation" && isPrimaryEdge ? 2.8 : 2,
@@ -148,10 +161,101 @@ function buildFlowLayout(nodes, edges, selectedTurnId) {
   return { flowNodes, flowEdges };
 }
 
-export function TurnGraph({ nodes, edges, selectedTurnId, onSelectTurn }) {
+export function TurnGraph({ nodes, edges, conversationId, selectedTurnId, onSelectTurn, onChanged }) {
+  const [editMode, setEditMode] = useState(false);
+  const [edgeLabel, setEdgeLabel] = useState("related");
+  const [pending, setPending] = useState(null); // turnId
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState(null);
+
+  const toggleEditMode = useCallback(() => {
+    setEditMode((open) => !open);
+    setPending(null);
+    setActionError(null);
+  }, []);
+
+  const linkTurns = useCallback(
+    async (fromTurnId, toTurnId) => {
+      setBusy(true);
+      setActionError(null);
+      try {
+        // Re-clicking an already-manually-linked pair relabels it instead of
+        // creating a duplicate edge — the same two-click gesture covers both.
+        const existingManual = edges.find(
+          (edge) => edge.fromTurnId === fromTurnId && edge.toTurnId === toTurnId && edge.origin === "manual",
+        );
+        if (existingManual) {
+          await api.updateTurnEdge(existingManual.id, edgeLabel, MANUAL_EDGE_CONFIDENCE);
+        } else {
+          await api.createTurnEdge(conversationId, fromTurnId, toTurnId, edgeLabel, MANUAL_EDGE_CONFIDENCE);
+        }
+        setPending(null);
+        await onChanged();
+      } catch {
+        setActionError("Couldn't save that edge.");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [conversationId, edgeLabel, edges, onChanged],
+  );
+
+  const removeEdge = useCallback(
+    async (edgeId) => {
+      setBusy(true);
+      setActionError(null);
+      try {
+        await api.deleteTurnEdge(edgeId);
+        await onChanged();
+      } catch {
+        setActionError("Couldn't remove that edge.");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [onChanged],
+  );
+
+  const handleNodeClick = useCallback(
+    (_, node) => {
+      if (busy) {
+        return;
+      }
+      if (!editMode) {
+        onSelectTurn(Number(node.id));
+        return;
+      }
+      const turnId = Number(node.id);
+      if (pending === null) {
+        setPending(turnId);
+        return;
+      }
+      if (pending === turnId) {
+        setPending(null);
+        return;
+      }
+      void linkTurns(Math.min(pending, turnId), Math.max(pending, turnId));
+    },
+    [editMode, pending, busy, onSelectTurn, linkTurns],
+  );
+
+  const handleEdgeClick = useCallback(
+    (_, edge) => {
+      if (!editMode || busy) {
+        return;
+      }
+      if (edge.data.origin !== "manual") {
+        setActionError("Only a manually-created edge can be removed here.");
+        return;
+      }
+      void removeEdge(edge.data.edgeId);
+    },
+    [editMode, busy, removeEdge],
+  );
+
   const { flowNodes, flowEdges } = useMemo(
-    () => buildFlowLayout(nodes, edges, selectedTurnId),
-    [nodes, edges, selectedTurnId],
+    () => buildFlowLayout(nodes, edges, selectedTurnId, pending),
+    [nodes, edges, selectedTurnId, pending],
   );
 
   if (!nodes.length) {
@@ -159,21 +263,58 @@ export function TurnGraph({ nodes, edges, selectedTurnId, onSelectTurn }) {
   }
 
   return (
-    <ReactFlow
-      nodes={flowNodes}
-      edges={flowEdges}
-      nodeTypes={nodeTypes}
-      fitView
-      fitViewOptions={{ padding: 0.2 }}
-      nodesDraggable={false}
-      nodesConnectable={false}
-      onNodeClick={(_, node) => onSelectTurn(Number(node.id))}
-      minZoom={0.2}
-      maxZoom={1.75}
-      colorMode="system"
-    >
-      <Background gap={20} size={1} />
-      <Controls showInteractive={false} />
-    </ReactFlow>
+    <div className="turnGraphRoot">
+      <div className="workspaceMapToolbar turnGraphToolbar">
+        <button
+          type="button"
+          className={`ghostButton${editMode ? " ghostButtonActive" : ""}`}
+          onClick={toggleEditMode}
+        >
+          {editMode ? "Done editing" : "Edit edges"}
+        </button>
+        {editMode ? (
+          <div className="linkKindToggle" role="group" aria-label="Edge label">
+            {EDGE_LABELS.map((label) => (
+              <button
+                key={label}
+                type="button"
+                className={`linkKindOption${edgeLabel === label ? " linkKindOptionActive" : ""}`}
+                onClick={() => setEdgeLabel(label)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        {editMode ? (
+          <span className="workspaceMapHint">
+            {actionError
+              ? actionError
+              : pending !== null
+                ? "Click another turn to link it, or click it again to cancel."
+                : "Click a turn, then another to link or relabel them. Click a pinned edge to remove it."}
+          </span>
+        ) : null}
+      </div>
+      <div className="turnGraphCanvas">
+        <ReactFlow
+          nodes={flowNodes}
+          edges={flowEdges}
+          nodeTypes={nodeTypes}
+          fitView
+          fitViewOptions={{ padding: 0.2 }}
+          nodesDraggable={false}
+          nodesConnectable={false}
+          onNodeClick={handleNodeClick}
+          onEdgeClick={handleEdgeClick}
+          minZoom={0.2}
+          maxZoom={1.75}
+          colorMode="system"
+        >
+          <Background gap={20} size={1} />
+          <Controls showInteractive={false} />
+        </ReactFlow>
+      </div>
+    </div>
   );
 }

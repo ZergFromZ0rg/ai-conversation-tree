@@ -372,6 +372,15 @@ The graph lives in a drawer on the right:
   branch and related links are drawn as secondary curves
 - clicking a graph node scrolls the transcript to that turn and highlights it
 - the drawer header has `Refresh` and `Reanalyze`
+- `Edit edges`, above the graph, switches to hand-editing mode for this
+  conversation's own edges (`POST`/`PATCH`/`DELETE /edges`) — a label picker
+  (`continuation`/`branch`/`related`) next to it sets what the next pair
+  creates. Click a turn, then another: if no manual edge exists between them
+  yet, this creates one with the current label; if one already does, this
+  relabels it instead of creating a duplicate — the same two-click gesture
+  covers both. Click a manually-created edge to remove it; clicking a
+  classifier (`auto`) edge in this mode does nothing but say so. Outside edit
+  mode, clicking a node behaves as above (select and scroll)
 - below the graph, an "also discussed elsewhere" panel lists the other
   conversations that share the selected turn's concept(s); each is a button that
   switches to that conversation
@@ -664,7 +673,6 @@ Planned work:
   Responses API's streaming SSE format needs a live key — streaming for the
   stub and `Ollama` is done)
 - conversation rename (auto-titling from the first message is done)
-- edge-correction tooling in the drawer (create / relabel / delete edges)
 - graph filtering by edge type and subgraph focus
 
 ## Notes

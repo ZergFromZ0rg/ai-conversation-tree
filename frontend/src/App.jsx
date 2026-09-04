@@ -230,6 +230,7 @@ export function App() {
           conceptLinks={conceptLinks}
           selectedConceptIds={selectedConceptIds}
           onOpenConversation={selectConversation}
+          conversationId={conversationId}
           turnCount={turnCount}
           threadCount={threadCount}
           selectedTurnId={selectedTurnId}

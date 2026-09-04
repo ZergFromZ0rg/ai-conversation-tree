@@ -38,6 +38,17 @@ export const api = {
       body: JSON.stringify({ aConceptKey, bConceptKey, kind }),
     }),
   deleteConceptLink: (linkId) => apiRequest(`/concept-links/${linkId}`, { method: "DELETE" }),
+  createTurnEdge: (conversationId, fromTurnId, toTurnId, label, confidence) =>
+    apiRequest("/edges", {
+      method: "POST",
+      body: JSON.stringify({ conversationId, fromTurnId, toTurnId, label, confidence }),
+    }),
+  updateTurnEdge: (edgeId, label, confidence) =>
+    apiRequest(`/edges/${edgeId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ label, confidence }),
+    }),
+  deleteTurnEdge: (edgeId) => apiRequest(`/edges/${edgeId}`, { method: "DELETE" }),
   streamTurn: (conversationId, userText, model) =>
     streamEvents(`/conversations/${conversationId}/turns/stream`, { userText, model: model ?? null }),
   analyze: (conversationId) =>

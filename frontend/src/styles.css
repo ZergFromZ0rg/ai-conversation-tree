@@ -604,6 +604,23 @@ button {
   position: relative;
 }
 
+.turnGraphRoot {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.turnGraphToolbar {
+  padding: 8px 14px;
+}
+
+.turnGraphCanvas {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
 .graphEmpty {
   display: flex;
   align-items: center;
@@ -762,6 +779,11 @@ button {
 }
 
 .turnNodeSelected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--selected-ring);
+}
+
+.turnNodePending {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--selected-ring);
 }
