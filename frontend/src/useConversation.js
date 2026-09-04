@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 
 const emptyGraph = { nodes: [], edges: [] };
+const emptyConceptLinks = { concepts: [] };
 
 /**
  * Owns one conversation's turns + graph and the actions that mutate them.
@@ -11,6 +12,7 @@ const emptyGraph = { nodes: [], edges: [] };
 export function useConversation(conversationId) {
   const [turns, setTurns] = useState([]);
   const [graph, setGraph] = useState(emptyGraph);
+  const [conceptLinks, setConceptLinks] = useState(emptyConceptLinks);
   const [status, setStatus] = useState("idle");
   const [pendingUserText, setPendingUserText] = useState(null);
 
@@ -18,17 +20,20 @@ export function useConversation(conversationId) {
     if (!conversationId) {
       setTurns([]);
       setGraph(emptyGraph);
+      setConceptLinks(emptyConceptLinks);
       setStatus("idle");
       return;
     }
     setStatus("loading");
     try {
-      const [turnsPayload, graphPayload] = await Promise.all([
+      const [turnsPayload, graphPayload, conceptLinksPayload] = await Promise.all([
         api.getTurns(conversationId),
         api.getGraph(conversationId),
+        api.getConceptLinks(conversationId).catch(() => emptyConceptLinks),
       ]);
       setTurns(turnsPayload.turns);
       setGraph({ nodes: graphPayload.nodes, edges: graphPayload.edges });
+      setConceptLinks({ concepts: conceptLinksPayload.concepts ?? [] });
       setStatus("idle");
     } catch {
       setStatus("error");
@@ -72,5 +77,5 @@ export function useConversation(conversationId) {
     }
   }, [conversationId, refresh]);
 
-  return { turns, graph, status, pendingUserText, sendTurn, analyze, refresh };
+  return { turns, graph, conceptLinks, status, pendingUserText, sendTurn, analyze, refresh };
 }

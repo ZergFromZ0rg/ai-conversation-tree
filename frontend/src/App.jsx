@@ -35,7 +35,7 @@ export function App() {
   const [models, setModels] = useState([]);
   const [selectedModel, setSelectedModel] = useState(readModelPreference);
 
-  const { turns, graph, status, pendingUserText, sendTurn, analyze, refresh } =
+  const { turns, graph, conceptLinks, status, pendingUserText, sendTurn, analyze, refresh } =
     useConversation(conversationId);
 
   const isBusy = status === "loading" || status === "sending" || status === "analyzing";
@@ -144,6 +144,8 @@ export function App() {
 
   const activeConversation = conversations.find((conversation) => conversation.id === conversationId);
   const composerDisabled = !conversationId || status === "sending";
+  const selectedConceptIds =
+    turns.find((turn) => turn.id === selectedTurnId)?.conceptIds ?? [];
 
   return (
     <div className="appRoot">
@@ -198,6 +200,9 @@ export function App() {
           isOpen={drawerOpen}
           onClose={() => setDrawerOpen(false)}
           graph={graph}
+          conceptLinks={conceptLinks}
+          selectedConceptIds={selectedConceptIds}
+          onOpenConversation={selectConversation}
           turnCount={turnCount}
           threadCount={threadCount}
           selectedTurnId={selectedTurnId}

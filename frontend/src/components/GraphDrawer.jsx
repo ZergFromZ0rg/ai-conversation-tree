@@ -6,10 +6,56 @@ const legend = [
   { key: "related", label: "Related" },
 ];
 
+function ConceptLinksPanel({ concepts, selectedConceptIds, onOpenConversation }) {
+  const hasSelection = selectedConceptIds.length > 0;
+  const groups = hasSelection
+    ? concepts.filter((concept) => selectedConceptIds.includes(concept.conceptId))
+    : concepts;
+
+  if (concepts.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className="conceptLinks">
+      <div className="conceptLinksTitle">Also discussed elsewhere</div>
+      {groups.length === 0 ? (
+        <p className="conceptLinksHint">This turn&rsquo;s topics aren&rsquo;t linked to other chats.</p>
+      ) : (
+        groups.map((group) => (
+          <div key={group.conceptId} className="conceptLinkGroup">
+            <div className="conceptLinkConcept">{group.label || `Concept ${group.conceptId}`}</div>
+            <ul className="conceptLinkList">
+              {group.links.map((link) => (
+                <li key={`${link.conversationId}-${link.conceptId}`}>
+                  <button
+                    type="button"
+                    className="conceptLinkItem"
+                    onClick={() => onOpenConversation(link.conversationId)}
+                  >
+                    <span className={`conceptLinkKind conceptLinkKind--${link.kind}`}>{link.kind}</span>
+                    <span className="conceptLinkText">
+                      {link.conversationTitle || `Conversation ${link.conversationId}`}
+                      {link.label ? ` — ${link.label}` : ""}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))
+      )}
+    </section>
+  );
+}
+
 export function GraphDrawer({
   isOpen,
   onClose,
   graph,
+  conceptLinks,
+  selectedConceptIds,
+  onOpenConversation,
   turnCount,
   threadCount,
   selectedTurnId,
@@ -49,6 +95,12 @@ export function GraphDrawer({
           onSelectTurn={onSelectTurn}
         />
       </div>
+
+      <ConceptLinksPanel
+        concepts={conceptLinks.concepts}
+        selectedConceptIds={selectedConceptIds}
+        onOpenConversation={onOpenConversation}
+      />
 
       <footer className="graphDrawerLegend">
         {legend.map((item) => (
