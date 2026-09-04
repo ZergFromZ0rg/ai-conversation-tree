@@ -588,6 +588,16 @@ button {
   cursor: not-allowed;
 }
 
+.ghostButtonActive {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.ghostButtonActive:hover:not(:disabled) {
+  background: var(--accent);
+}
+
 .graphDrawerBody {
   flex: 1;
   min-height: 0;
@@ -818,6 +828,45 @@ button {
   border-bottom: 1px solid var(--border);
 }
 
+.workspaceMapToolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.linkKindToggle {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.linkKindOption {
+  border: none;
+  background: var(--bg);
+  color: var(--text-muted);
+  padding: 5px 10px;
+  font-size: 13px;
+  text-transform: capitalize;
+}
+
+.linkKindOption:not(:first-child) {
+  border-left: 1px solid var(--border-strong);
+}
+
+.linkKindOptionActive {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.workspaceMapHint {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 .workspaceMapBody {
   flex: 1;
   min-height: 0;
@@ -866,6 +915,11 @@ button {
 
 .conceptNodeHandle {
   opacity: 0;
+}
+
+.conceptNodePending {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--selected-ring);
 }
 
 /* ---------- mobile ---------- */

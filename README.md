@@ -343,6 +343,13 @@ concept across every conversation as a node, laid out in a grid clustered and
 coloured by conversation, with the cross-conversation concept links as edges.
 Clicking a concept switches to that conversation.
 
+`Link concepts` in the map toolbar switches to hand-linking mode: click one
+concept, then another, to `POST /concept-links` a `manual` link between them
+(the toggle next to it picks `related` or `same`); a pinned link is drawn in a
+third colour and labelled "pinned". Clicking a pinned link removes it; clicking
+an `auto` link in this mode does nothing — those come from the classifier, not
+from a click.
+
 The UI follows the browser's light/dark preference. It does not stream replies
 token by token yet.
 
@@ -517,8 +524,8 @@ cd frontend && npm run build
 - `same` vs `related` is a two-threshold heuristic; `all-MiniLM-L6-v2` cannot
   reliably separate genuinely adjacent topics from noise, so recall is
   conservative
-- there is no UI yet for creating a `manual` concept link — `POST /concept-links`
-  works, but nothing in the app calls it
+- a manual concept link always has kind `same` or `related` at score `1.0`;
+  there's no way to record a weaker hand-made connection
 - local `Ollama` latency depends heavily on hardware and model size
 - the in-memory graph cache assumes a single backend process (one `uvicorn` worker)
 - replies are not streamed token by token
@@ -580,8 +587,6 @@ Planned work:
 
 Planned work:
 
-- a UI for creating and removing a `manual` link — `POST` / `DELETE
-  /concept-links` exist, likely click-to-connect in the workspace map
 - name concepts from top terms rather than the first question
 - score concepts against each other with the cross-encoder, not just embeddings
 - a real layout for the workspace map (edges currently cross freely between

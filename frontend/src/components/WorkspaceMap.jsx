@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Background, Controls, Handle, MarkerType, Position, ReactFlow } from "@xyflow/react";
 import { api } from "../api";
 
@@ -9,6 +9,8 @@ const NODE_HEIGHT = 60;
 const NODE_GAP = 14;
 const HEADER_HEIGHT = 34;
 const ROW_GAP = 52;
+
+const LINK_KINDS = ["related", "same"];
 
 // Distinct-ish hues cycled per conversation so a cluster reads as one colour.
 const conversationColors = [
@@ -28,8 +30,11 @@ function truncate(text, limit = 64) {
 }
 
 function ConceptNode({ data }) {
+  const className = ["conceptNode", data.isPending ? "conceptNodePending" : ""]
+    .filter(Boolean)
+    .join(" ");
   return (
-    <div className="conceptNode" style={{ borderColor: data.color }}>
+    <div className={className} style={{ borderColor: data.isPending ? undefined : data.color }}>
       <Handle type="target" position={Position.Left} className="conceptNodeHandle" />
       <div className="conceptNodeTitle" style={{ color: data.color }}>
         {data.conversationTitle}
@@ -101,6 +106,7 @@ function buildLayout(graph) {
               label: concept.label,
               conversationTitle: conversation.conversationTitle,
               conversationId: concept.conversationId,
+              conceptKey: concept.conceptKey,
               color,
             },
             draggable: false,
@@ -112,15 +118,21 @@ function buildLayout(graph) {
     rowTop += HEADER_HEIGHT + tallest * (NODE_HEIGHT + NODE_GAP) + ROW_GAP;
   }
 
-  const flowEdges = graph.edges.map((edge, index) => {
-    const color = edge.kind === "same" ? "#60a5fa" : "#94a3b8";
+  const flowEdges = graph.edges.map((edge) => {
+    const isManual = edge.origin === "manual";
+    const color = isManual ? "#f472b6" : edge.kind === "same" ? "#60a5fa" : "#94a3b8";
     return {
-      id: `${edge.a.conversationId}:${edge.a.conceptId}-${edge.b.conversationId}:${edge.b.conceptId}-${index}`,
+      id: String(edge.id),
       source: `${edge.a.conversationId}:${edge.a.conceptId}`,
       target: `${edge.b.conversationId}:${edge.b.conceptId}`,
       type: "bezier",
-      label: `${edge.kind} ${edge.score.toFixed(2)}`,
-      style: { stroke: color, strokeWidth: edge.kind === "same" ? 2.4 : 1.8, strokeDasharray: edge.kind === "same" ? undefined : "6 4" },
+      label: isManual ? `${edge.kind} · pinned` : `${edge.kind} ${edge.score.toFixed(2)}`,
+      data: { linkId: edge.id, origin: edge.origin },
+      style: {
+        stroke: color,
+        strokeWidth: isManual || edge.kind === "same" ? 2.4 : 1.8,
+        strokeDasharray: isManual ? undefined : edge.kind === "same" ? undefined : "6 4",
+      },
       labelStyle: { fill: color, fontSize: 11, fontWeight: 600 },
       labelBgStyle: { fill: "var(--graph-label-bg)", fillOpacity: 0.88 },
       markerStart: { type: MarkerType.ArrowClosed, color },
@@ -139,22 +151,26 @@ const allNodeTypes = { ...nodeTypes, conceptGroupTitle: GroupTitleNode };
 
 export function WorkspaceMap({ onClose, onOpenConversation }) {
   const [graph, setGraph] = useState(null);
-  const [error, setError] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const [linkMode, setLinkMode] = useState(false);
+  const [linkKind, setLinkKind] = useState("related");
+  const [pending, setPending] = useState(null); // { nodeId, conceptKey }
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState(null);
+
+  const reloadGraph = useCallback(async () => {
+    try {
+      const payload = await api.getConceptGraph();
+      setGraph(payload);
+      setLoadError(false);
+    } catch {
+      setLoadError(true);
+    }
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    api
-      .getConceptGraph()
-      .then((payload) => {
-        if (!cancelled) setGraph(payload);
-      })
-      .catch(() => {
-        if (!cancelled) setError(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    void reloadGraph();
+  }, [reloadGraph]);
 
   useEffect(() => {
     function onKeyDown(event) {
@@ -164,7 +180,90 @@ export function WorkspaceMap({ onClose, onOpenConversation }) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
 
+  const toggleLinkMode = useCallback(() => {
+    setLinkMode((open) => !open);
+    setPending(null);
+    setActionError(null);
+  }, []);
+
+  const createLink = useCallback(
+    async (keyA, keyB) => {
+      setBusy(true);
+      setActionError(null);
+      try {
+        await api.createConceptLink(keyA, keyB, linkKind);
+        setPending(null);
+        await reloadGraph();
+      } catch {
+        setActionError("Couldn't create that link.");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [linkKind, reloadGraph],
+  );
+
+  const removeLink = useCallback(
+    async (linkId) => {
+      setBusy(true);
+      setActionError(null);
+      try {
+        await api.deleteConceptLink(linkId);
+        await reloadGraph();
+      } catch {
+        setActionError("Couldn't remove that link.");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [reloadGraph],
+  );
+
+  const handleNodeClick = useCallback(
+    (_, node) => {
+      if (node.type !== "conceptNode" || busy) {
+        return;
+      }
+      if (!linkMode) {
+        onOpenConversation(node.data.conversationId);
+        onClose();
+        return;
+      }
+      if (!pending) {
+        setPending({ nodeId: node.id, conceptKey: node.data.conceptKey });
+        return;
+      }
+      if (pending.nodeId === node.id) {
+        setPending(null);
+        return;
+      }
+      void createLink(pending.conceptKey, node.data.conceptKey);
+    },
+    [linkMode, pending, busy, createLink, onOpenConversation, onClose],
+  );
+
+  const handleEdgeClick = useCallback(
+    (_, edge) => {
+      if (!linkMode || busy) {
+        return;
+      }
+      if (edge.data.origin !== "manual") {
+        setActionError("Only a link you pinned by hand can be removed here.");
+        return;
+      }
+      void removeLink(edge.data.linkId);
+    },
+    [linkMode, busy, removeLink],
+  );
+
   const layout = useMemo(() => (graph ? buildLayout(graph) : null), [graph]);
+  const nodesForRender = useMemo(() => {
+    if (!layout) return [];
+    if (!pending) return layout.flowNodes;
+    return layout.flowNodes.map((node) =>
+      node.id === pending.nodeId ? { ...node, data: { ...node.data, isPending: true } } : node,
+    );
+  }, [layout, pending]);
   const edgeCount = graph?.edges.length ?? 0;
 
   return (
@@ -182,8 +281,41 @@ export function WorkspaceMap({ onClose, onOpenConversation }) {
           </button>
         </header>
 
+        <div className="workspaceMapToolbar">
+          <button
+            type="button"
+            className={`ghostButton${linkMode ? " ghostButtonActive" : ""}`}
+            onClick={toggleLinkMode}
+          >
+            {linkMode ? "Done linking" : "Link concepts"}
+          </button>
+          {linkMode ? (
+            <div className="linkKindToggle" role="group" aria-label="Link kind">
+              {LINK_KINDS.map((kind) => (
+                <button
+                  key={kind}
+                  type="button"
+                  className={`linkKindOption${linkKind === kind ? " linkKindOptionActive" : ""}`}
+                  onClick={() => setLinkKind(kind)}
+                >
+                  {kind}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          <span className="workspaceMapHint">
+            {actionError
+              ? actionError
+              : !linkMode
+                ? "Click a concept to jump to that conversation."
+                : pending
+                  ? "Click another concept to link it, or click it again to cancel."
+                  : "Click a concept, then another to link them. Click a pinned link to remove it."}
+          </span>
+        </div>
+
         <div className="workspaceMapBody">
-          {error ? (
+          {loadError ? (
             <div className="graphEmpty">Couldn&rsquo;t load the concept graph.</div>
           ) : !layout ? (
             <div className="graphEmpty">Loading…</div>
@@ -191,19 +323,15 @@ export function WorkspaceMap({ onClose, onOpenConversation }) {
             <div className="graphEmpty">No concepts yet — send some messages first.</div>
           ) : (
             <ReactFlow
-              nodes={layout.flowNodes}
+              nodes={nodesForRender}
               edges={layout.flowEdges}
               nodeTypes={allNodeTypes}
               fitView
               fitViewOptions={{ padding: 0.15 }}
               nodesDraggable={false}
               nodesConnectable={false}
-              onNodeClick={(_, node) => {
-                if (node.type === "conceptNode") {
-                  onOpenConversation(node.data.conversationId);
-                  onClose();
-                }
-              }}
+              onNodeClick={handleNodeClick}
+              onEdgeClick={handleEdgeClick}
               minZoom={0.1}
               maxZoom={1.75}
               colorMode="system"

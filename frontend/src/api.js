@@ -32,6 +32,12 @@ export const api = {
   getConceptLinks: (conversationId) =>
     apiRequest(`/conversations/${conversationId}/concept-links`),
   getConceptGraph: () => apiRequest("/concepts/graph"),
+  createConceptLink: (aConceptKey, bConceptKey, kind) =>
+    apiRequest("/concept-links", {
+      method: "POST",
+      body: JSON.stringify({ aConceptKey, bConceptKey, kind }),
+    }),
+  deleteConceptLink: (linkId) => apiRequest(`/concept-links/${linkId}`, { method: "DELETE" }),
   sendTurn: (conversationId, userText, model) =>
     apiRequest(`/conversations/${conversationId}/turns`, {
       method: "POST",
