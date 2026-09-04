@@ -40,7 +40,7 @@ export function useConversation(conversationId) {
   }, [refresh]);
 
   const sendTurn = useCallback(
-    async (rawText) => {
+    async (rawText, model) => {
       const userText = rawText.trim();
       if (!conversationId || !userText) {
         return;
@@ -48,7 +48,7 @@ export function useConversation(conversationId) {
       setPendingUserText(userText);
       setStatus("sending");
       try {
-        await api.sendTurn(conversationId, userText);
+        await api.sendTurn(conversationId, userText, model);
         setPendingUserText(null);
         await refresh();
       } catch {

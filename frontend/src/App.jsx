@@ -8,6 +8,7 @@ import { GraphRail } from "./components/GraphRail";
 import { GraphDrawer } from "./components/GraphDrawer";
 
 const DRAWER_STORAGE_KEY = "act.drawerOpen";
+const MODEL_STORAGE_KEY = "act.model";
 
 function readDrawerPreference() {
   try {
@@ -17,12 +18,22 @@ function readDrawerPreference() {
   }
 }
 
+function readModelPreference() {
+  try {
+    return window.localStorage.getItem(MODEL_STORAGE_KEY) || null;
+  } catch {
+    return null;
+  }
+}
+
 export function App() {
   const [conversations, setConversations] = useState([]);
   const [conversationId, setConversationId] = useState(null);
   const [selectedTurnId, setSelectedTurnId] = useState(null);
   const [drawerOpen, setDrawerOpen] = useState(readDrawerPreference);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [models, setModels] = useState([]);
+  const [selectedModel, setSelectedModel] = useState(readModelPreference);
 
   const { turns, graph, status, pendingUserText, sendTurn, analyze, refresh } =
     useConversation(conversationId);
@@ -44,6 +55,26 @@ export function App() {
   }, [loadConversations]);
 
   useEffect(() => {
+    void api
+      .listModels()
+      .then((payload) => {
+        setModels(payload.models);
+        setSelectedModel((current) => current ?? payload.default ?? null);
+      })
+      .catch(() => setModels([]));
+  }, []);
+
+  useEffect(() => {
+    try {
+      if (selectedModel) {
+        window.localStorage.setItem(MODEL_STORAGE_KEY, selectedModel);
+      }
+    } catch {
+      /* storage unavailable — ignore */
+    }
+  }, [selectedModel]);
+
+  useEffect(() => {
     try {
       window.localStorage.setItem(DRAWER_STORAGE_KEY, drawerOpen ? "1" : "0");
     } catch {
@@ -62,17 +93,35 @@ export function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  const selectConversation = useCallback((id) => {
-    setConversationId(id);
-    setSelectedTurnId(null);
-    setSidebarOpen(false);
-  }, []);
+  const selectConversation = useCallback(
+    (id) => {
+      setConversationId(id);
+      setSelectedTurnId(null);
+      setSidebarOpen(false);
+      const target = conversations.find((conversation) => conversation.id === id);
+      if (target?.model) {
+        setSelectedModel(target.model);
+      }
+    },
+    [conversations],
+  );
 
   const createConversation = useCallback(async () => {
-    const created = await api.createConversation(null);
+    const created = await api.createConversation(null, selectedModel);
     await loadConversations();
     selectConversation(created.conversationId);
-  }, [loadConversations, selectConversation]);
+  }, [loadConversations, selectConversation, selectedModel]);
+
+  const handleModelChange = useCallback(
+    async (model) => {
+      setSelectedModel(model);
+      if (conversationId) {
+        await api.setConversationModel(conversationId, model);
+        await loadConversations();
+      }
+    },
+    [conversationId, loadConversations],
+  );
 
   const deleteConversation = useCallback(
     async (id) => {
@@ -87,10 +136,10 @@ export function App() {
 
   const handleSend = useCallback(
     async (text) => {
-      await sendTurn(text);
+      await sendTurn(text, selectedModel);
       await loadConversations();
     },
-    [sendTurn, loadConversations],
+    [sendTurn, loadConversations, selectedModel],
   );
 
   const activeConversation = conversations.find((conversation) => conversation.id === conversationId);
@@ -138,6 +187,9 @@ export function App() {
           onSend={handleSend}
           disabled={composerDisabled}
           placeholder={conversationId ? "Send a message" : "Start a new chat first"}
+          models={models}
+          model={selectedModel}
+          onModelChange={handleModelChange}
         />
       </main>
 

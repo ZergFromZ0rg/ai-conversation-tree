@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 const MAX_HEIGHT = 200;
 
-export function Composer({ onSend, disabled, placeholder }) {
+export function Composer({ onSend, disabled, placeholder, models = [], model, onModelChange }) {
   const [value, setValue] = useState("");
   const textareaRef = useRef(null);
 
@@ -37,8 +37,32 @@ export function Composer({ onSend, disabled, placeholder }) {
     }
   }
 
+  const showPicker = models.length > 0 && onModelChange;
+  const modelOptions =
+    model && !models.some((option) => option.id === model)
+      ? [...models, { id: model, label: `${model} (unavailable)` }]
+      : models;
+
   return (
     <div className="composer">
+      {showPicker ? (
+        <div className="composerTools">
+          <label className="modelPicker">
+            <span className="modelPickerLabel">Model</span>
+            <select
+              className="modelPickerSelect"
+              value={model ?? ""}
+              onChange={(event) => onModelChange(event.target.value)}
+            >
+              {modelOptions.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      ) : null}
       <div className="composerBox">
         <textarea
           ref={textareaRef}

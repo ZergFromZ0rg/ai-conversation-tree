@@ -14,19 +14,25 @@ async function apiRequest(path, init) {
 
 export const api = {
   listConversations: () => apiRequest("/conversations"),
-  createConversation: (title) =>
+  listModels: () => apiRequest("/models"),
+  createConversation: (title, model) =>
     apiRequest("/conversations", {
       method: "POST",
-      body: JSON.stringify({ title: title ?? null }),
+      body: JSON.stringify({ title: title ?? null, model: model ?? null }),
     }),
   deleteConversation: (conversationId) =>
     apiRequest(`/conversations/${conversationId}`, { method: "DELETE" }),
+  setConversationModel: (conversationId, model) =>
+    apiRequest(`/conversations/${conversationId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ model: model ?? null }),
+    }),
   getTurns: (conversationId) => apiRequest(`/conversations/${conversationId}/turns`),
   getGraph: (conversationId) => apiRequest(`/conversations/${conversationId}/graph`),
-  sendTurn: (conversationId, userText) =>
+  sendTurn: (conversationId, userText, model) =>
     apiRequest(`/conversations/${conversationId}/turns`, {
       method: "POST",
-      body: JSON.stringify({ userText }),
+      body: JSON.stringify({ userText, model: model ?? null }),
     }),
   analyze: (conversationId) =>
     apiRequest(`/conversations/${conversationId}/analyze`, { method: "POST" }),

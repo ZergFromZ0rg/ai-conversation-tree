@@ -380,6 +380,38 @@ button {
   padding: 8px 20px 18px;
 }
 
+.composerTools {
+  max-width: var(--transcript-width);
+  margin: 0 auto 8px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.modelPicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.modelPickerSelect {
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 4px 8px;
+  cursor: pointer;
+  max-width: 220px;
+}
+
+.modelPickerSelect:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .composerBox {
   max-width: var(--transcript-width);
   margin: 0 auto;
