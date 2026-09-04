@@ -54,5 +54,12 @@
     "previousAiText": "Leaves are green because chlorophyll reflects green light.",
     "userText": "How do I write a binary search in Python?",
     "expectedLabel": "unrelated"
+  },
+  {
+    "name": "unrelated sequencing marker on a topic switch",
+    "previousUserText": "Why are leaves green?",
+    "previousAiText": "Leaves are green because chlorophyll reflects green light.",
+    "userText": "How do I set up Postgres next?",
+    "expectedLabel": "unrelated"
   }
 ]

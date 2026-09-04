@@ -122,6 +122,19 @@ followupPatterns = [
     "which one",
 ]
 
+# Explicit "next step in the same task" markers. Paired with a forward pattern
+# ("how do i ... next"), these anchor a continuation even when the embeddings
+# have drifted, because the phrasing itself asserts sequence.
+sequencingPatterns = [
+    "next",
+    "next step",
+    "after that",
+    "afterwards",
+    "from here",
+    "what's next",
+    "whats next",
+]
+
 definitionPrefixes = (
     "what is ",
     "what are ",
@@ -196,9 +209,24 @@ def hasComparisonFollowup(features: dict) -> bool:
     )
 
 
+def _maxTopicalSignal(similarity: float, features: dict) -> float:
+    return max(
+        similarity,
+        features["userTopicSimilarity"],
+        features["answerSimilarity"],
+        features["contentOverlap"],
+    )
+
+
 def hasForwardAnchor(similarity: float, features: dict) -> bool:
     # Generic "how do I learn/use X" phrasing should only count as continuation
     # when topic identity is clearly established, not from incidental overlap.
+    # An explicit sequencing marker ("...next", "after that") lowers that bar
+    # from "clearly established" to "not absent" — the phrasing asserts a next
+    # step, but the topic still has to be at least faintly present so a plain
+    # topic switch that happens to contain "next" is not pulled in.
+    if features["sequencingScore"] > 0 and _maxTopicalSignal(similarity, features) >= minEmbeddingFloor:
+        return True
     return (
         similarity >= strongTopicSimilarityThreshold
         or features["userTopicSimilarity"] >= strongTopicSimilarityThreshold
@@ -387,6 +415,7 @@ def extractDiscourseFeatures(userText: str, previousUserText: str, previousAiTex
     referenceScore = countPatternMatches(userLower, referencePatterns)
     pronounReferenceScore = countPatternMatches(userLower, pronounReferencePatterns)
     forwardScore = countPatternMatches(userLower, forwardPatterns)
+    sequencingScore = countPatternMatches(userLower, sequencingPatterns)
     topicShiftScore = countPatternMatches(userLower, topicShiftPatterns)
     comparisonScore = countPatternMatches(userLower, comparisonPatterns)
     followupQuestionScore = countPatternMatches(userLower, followupPatterns)
@@ -426,6 +455,7 @@ def extractDiscourseFeatures(userText: str, previousUserText: str, previousAiTex
         "referenceScore": referenceScore,
         "pronounReferenceScore": pronounReferenceScore,
         "forwardScore": forwardScore,
+        "sequencingScore": sequencingScore,
         "topicShiftScore": topicShiftScore,
         "comparisonScore": comparisonScore,
         "followupQuestionScore": followupQuestionScore,
