@@ -24,7 +24,14 @@ const EDGE_LABELS = ["continuation", "branch", "related"];
 const MANUAL_EDGE_CONFIDENCE = 1.0;
 
 const NODE_WIDTH = 240;
-const NODE_HEIGHT = 92;
+// The tallest a turnNode card actually renders (title + a 2-line-clamped
+// preview + padding) — used for both dagre's own layout and the routing
+// math's node top/bottom edges. Deliberately the real max, not a padded
+// guess: routing math treats it as a safe upper bound on every card's real
+// height, so going higher just reopens the gap between an arrow and the
+// card it's supposedly touching; going lower risks a card's real bottom
+// edge poking past a lane a route assumed was clear.
+const NODE_HEIGHT = 76;
 
 function truncatePreview(text, limit = 90) {
   const normalized = (text ?? "").replace(/\s+/g, " ").trim();
@@ -237,7 +244,9 @@ function buildFlowLayout(nodes, edges, selectedTurnId, pendingTurnId) {
         strokeDasharray: edge.label === "related" || !isPrimaryEdge ? "6 4" : undefined,
       },
       labelStyle: { fill: color, fontSize: 11, fontWeight: 600 },
-      labelBgStyle: { fill: "var(--graph-label-bg)", fillOpacity: 0.88 },
+      labelBgStyle: { fill: "var(--graph-label-bg)", fillOpacity: 1 },
+      labelBgPadding: [4, 2],
+      labelBgBorderRadius: 3,
       markerStart: isBidirectionalRelated ? { type: MarkerType.ArrowClosed, color } : undefined,
       markerEnd: { type: MarkerType.ArrowClosed, color },
       zIndex: isPrimaryEdge ? 2 : 1,

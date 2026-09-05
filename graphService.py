@@ -495,17 +495,30 @@ def scoreEdgeLabels(similarity: float, features: dict) -> dict:
         "related": 0.0,
     }
     
+    # A bare pronoun reference ("that", "it") with no explicit clarification
+    # ("what do you mean") or reference ("you said") marker is asking to go
+    # deeper on the same thing just discussed, not branching off to examine
+    # it — that pattern belongs to continuation, not branch. Only a pronoun
+    # reference *combined with* one of those explicit markers still reads as
+    # a branch-style "wait, why does that matter" tangent.
+    hasBarePronounReference = (
+        features["pronounReferenceScore"] > 0
+        and features["clarificationScore"] == 0
+        and features["referenceScore"] == 0
+    )
+
     # Branch: Requires both clarification/reference intent AND sufficient prior context
     # Clarifications like "what do you mean?" need the previous answer to make sense
     scores["branch"] += 2.5 * features["clarificationScore"]
     scores["branch"] += 1.5 * features["referenceScore"]
-    scores["branch"] += 0.5 * features["pronounReferenceScore"]
+    if not hasBarePronounReference:
+        scores["branch"] += 0.5 * features["pronounReferenceScore"]
     scores["branch"] += 1.0 * features["followupQuestionScore"]
     scores["branch"] += 0.9 * features["answerSimilarity"]
     # Only penalize short messages if they lack clarification intent
     if features["isShort"] and features["clarificationScore"] == 0:
         scores["branch"] -= 0.5
-    
+
     # Continuation: Moves the topic forward on the same thread
     # Similarity strengthens continuation, but should not create it by itself.
     hasForwardIntent = features["forwardScore"] > 0 and hasForwardAnchor(similarity, features)
@@ -517,6 +530,8 @@ def scoreEdgeLabels(similarity: float, features: dict) -> dict:
     if hasForwardIntent or hasComparisonIntent:
         scores["continuation"] += 2.0 * similarity
         scores["continuation"] += 0.5 * features["contentOverlap"]
+    if hasBarePronounReference:
+        scores["continuation"] += 0.6 * features["pronounReferenceScore"]
     scores["continuation"] += 0.8 * features["userTopicSimilarity"]
     scores["continuation"] += 0.5 * features["answerSimilarity"]
     
@@ -562,6 +577,15 @@ def judgeEdgeLabel(
             and features["answerSimilarity"] >= parallelDefinitionRelatedThreshold
         )
     )
+    # A bare pronoun reference (no clarification/reference marker alongside
+    # it) feeds continuation's score in scoreEdgeLabels above — this mirrors
+    # that same condition so the resulting score actually gets turned into a
+    # confidence instead of sitting unused.
+    hasBarePronounReference = (
+        features["pronounReferenceScore"] > 0
+        and features["clarificationScore"] == 0
+        and features["referenceScore"] == 0
+    )
     hasContinuationSignal = (
         hasForwardAnchor(similarity, features) and features["forwardScore"] > 0
         or hasComparisonFollowup(features)
@@ -570,6 +594,7 @@ def judgeEdgeLabel(
             features["userTopicSimilarity"] >= THRESHOLD
             and features["answerSimilarity"] >= parallelDefinitionRelatedThreshold
         )
+        or (hasBarePronounReference and _maxTopicalSignal(similarity, features) >= minEmbeddingFloor)
     )
     hasRelatedSignal = (
         features["topicShiftScore"] > 0

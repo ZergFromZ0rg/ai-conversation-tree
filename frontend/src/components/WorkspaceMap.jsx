@@ -224,7 +224,9 @@ function buildLayout(graph) {
         strokeDasharray: isManual ? undefined : edge.kind === "same" ? undefined : "6 4",
       },
       labelStyle: { fill: color, fontSize: 11, fontWeight: 600 },
-      labelBgStyle: { fill: "var(--graph-label-bg)", fillOpacity: 0.88 },
+      labelBgStyle: { fill: "var(--graph-label-bg)", fillOpacity: 1 },
+      labelBgPadding: [4, 2],
+      labelBgBorderRadius: 3,
       markerStart: { type: MarkerType.ArrowClosed, color },
       markerEnd: { type: MarkerType.ArrowClosed, color },
     };

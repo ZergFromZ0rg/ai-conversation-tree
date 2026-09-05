@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import Markdown from "react-markdown";
 
 function ChatMessage({ role, text, onSelect, isSelected }) {
   return (
@@ -7,7 +8,19 @@ function ChatMessage({ role, text, onSelect, isSelected }) {
       onClick={onSelect}
     >
       <div className="messageRole">{role === "user" ? "You" : "Assistant"}</div>
-      <div className="messageText">{text || <span className="messageMuted">…</span>}</div>
+      {text ? (
+        role === "assistant" ? (
+          <div className="messageText messageMarkdown">
+            <Markdown>{text}</Markdown>
+          </div>
+        ) : (
+          <div className="messageText">{text}</div>
+        )
+      ) : (
+        <div className="messageText">
+          <span className="messageMuted">…</span>
+        </div>
+      )}
     </div>
   );
 }

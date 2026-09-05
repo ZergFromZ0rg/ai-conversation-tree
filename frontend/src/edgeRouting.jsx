@@ -4,7 +4,17 @@ import { BaseEdge } from "@xyflow/react";
 // or a caller's own equivalent); falls back to nothing if a caller ever hands
 // this a malformed edge — never hit in practice, callers only use the
 // "routed" edge type when they actually computed a path.
-export function RoutedEdge({ data, style, label, labelStyle, labelBgStyle, markerStart, markerEnd }) {
+export function RoutedEdge({
+  data,
+  style,
+  label,
+  labelStyle,
+  labelBgStyle,
+  labelBgPadding,
+  labelBgBorderRadius,
+  markerStart,
+  markerEnd,
+}) {
   if (!data?.path) {
     return null;
   }
@@ -17,6 +27,8 @@ export function RoutedEdge({ data, style, label, labelStyle, labelBgStyle, marke
       labelY={data.labelY}
       labelStyle={labelStyle}
       labelBgStyle={labelBgStyle}
+      labelBgPadding={labelBgPadding}
+      labelBgBorderRadius={labelBgBorderRadius}
       markerStart={markerStart}
       markerEnd={markerEnd}
     />
