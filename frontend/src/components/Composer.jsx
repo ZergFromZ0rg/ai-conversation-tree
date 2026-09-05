@@ -84,7 +84,6 @@ export function Composer({ onSend, disabled, placeholder, models = [], model, on
           ↑
         </button>
       </div>
-      <p className="composerHint">Enter to send · Shift+Enter for a new line</p>
     </div>
   );
 }

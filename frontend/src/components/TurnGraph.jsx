@@ -101,17 +101,37 @@ function buildRankBands(nodeIds, dagreGraph) {
 // instead of source/target: whichever endpoint is higher up exits from its
 // bottom band, whichever is lower enters from its top band — the path is
 // still built source-first/target-last so arrowheads stay correct.
-function buildRankRouting(sourceId, targetId, positionsById, rankIndexById, rankTops, rankBottoms, highwayX, jitter) {
+//
+// highways is {left, right} — the two candidate detour lanes for edges that
+// skip more than one rank. Every node's Top/Bottom handles are fixed
+// regardless of column, so even a same-rank edge must leave one node's
+// bottom (or top) and re-enter the other's the same way; picking whichever
+// highway sits closer to the pair keeps that detour from crossing the whole
+// width when both endpoints already sit on the same side.
+function buildRankRouting(sourceId, targetId, positionsById, rankIndexById, rankTops, rankBottoms, highways, jitter) {
   const source = positionsById.get(sourceId);
   const target = positionsById.get(targetId);
   const sourceRank = rankIndexById.get(sourceId);
   const targetRank = rankIndexById.get(targetId);
-  if (!source || !target || sourceRank === targetRank) {
+  if (!source || !target) {
     return null;
   }
 
+  const midX = (source.x + target.x) / 2;
+  const highwayX = Math.abs(midX - highways.left) <= Math.abs(highways.right - midX) ? highways.left : highways.right;
   const laneBelow = (rank) => (rankBottoms[rank] + rankTops[rank + 1]) / 2;
   const laneAbove = (rank) => (rankTops[rank] + rankBottoms[rank - 1]) / 2;
+
+  if (sourceRank === targetRank) {
+    // Both ends leave from the same side of their rank — whichever gap is
+    // actually available (below, unless this is the last rank).
+    const lastRank = rankTops.length - 1;
+    const side = sourceRank < lastRank ? "bottom" : "top";
+    const exitY = side === "bottom" ? source.y + NODE_HEIGHT / 2 : source.y - NODE_HEIGHT / 2;
+    const enterY = side === "bottom" ? target.y + NODE_HEIGHT / 2 : target.y - NODE_HEIGHT / 2;
+    const laneY = side === "bottom" ? laneBelow(sourceRank) : laneAbove(sourceRank);
+    return buildLanePath(source.x, exitY, laneY, target.x, enterY, laneY, highwayX, jitter);
+  }
 
   // positionsById holds dagre's *center* coordinates, so the top/bottom edge
   // of a node is center ± half its height (not ±0 / ±full height).
@@ -149,7 +169,11 @@ function buildFlowLayout(nodes, edges, selectedTurnId, pendingTurnId) {
       return [id, { x: laidOut?.x ?? 0, y: laidOut?.y ?? 0 }];
     }),
   );
-  const highwayX = Math.max(...[...positionsById.values()].map((p) => p.x)) + NODE_WIDTH / 2 + HIGHWAY_MARGIN;
+  const xs = [...positionsById.values()].map((p) => p.x);
+  const highways = {
+    left: Math.min(...xs) - NODE_WIDTH / 2 - HIGHWAY_MARGIN,
+    right: Math.max(...xs) + NODE_WIDTH / 2 + HIGHWAY_MARGIN,
+  };
 
   const flowNodes = nodes.map((node) => {
     const laidOut = dagreGraph.node(String(node.id));
@@ -189,7 +213,7 @@ function buildFlowLayout(nodes, edges, selectedTurnId, pendingTurnId) {
     const sourceId = String(edge.fromTurnId);
     const targetId = String(edge.toTurnId);
     const routed = isBranchLike
-      ? buildRankRouting(sourceId, targetId, positionsById, rankIndexById, rankTops, rankBottoms, highwayX, index)
+      ? buildRankRouting(sourceId, targetId, positionsById, rankIndexById, rankTops, rankBottoms, highways, index)
       : null;
     return {
       id: String(edge.id ?? `${edge.fromTurnId}-${edge.toTurnId}-${edge.label}`),

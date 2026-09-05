@@ -534,14 +534,6 @@ button {
   cursor: not-allowed;
 }
 
-.composerHint {
-  max-width: var(--transcript-width);
-  margin: 6px auto 0;
-  text-align: center;
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
 /* ---------- graph rail ---------- */
 
 .graphRail {
