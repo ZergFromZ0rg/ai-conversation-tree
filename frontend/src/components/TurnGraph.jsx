@@ -115,7 +115,17 @@ function buildRankBands(nodeIds, dagreGraph) {
 // bottom (or top) and re-enter the other's the same way; picking whichever
 // highway sits closer to the pair keeps that detour from crossing the whole
 // width when both endpoints already sit on the same side.
-function buildRankRouting(sourceId, targetId, positionsById, rankIndexById, rankTops, rankBottoms, highways, jitter) {
+function buildRankRouting(
+  sourceId,
+  targetId,
+  positionsById,
+  rankIndexById,
+  rankTops,
+  rankBottoms,
+  highways,
+  jitter,
+  labelOffset,
+) {
   const source = positionsById.get(sourceId);
   const target = positionsById.get(targetId);
   const sourceRank = rankIndexById.get(sourceId);
@@ -126,19 +136,17 @@ function buildRankRouting(sourceId, targetId, positionsById, rankIndexById, rank
 
   const midX = (source.x + target.x) / 2;
   const highwayX = Math.abs(midX - highways.left) <= Math.abs(highways.right - midX) ? highways.left : highways.right;
-  // Biased toward the top of the gap (not the exact midpoint): a primary
-  // edge between adjacent ranks is a plain smoothstep whose own automatic
-  // label React Flow places at that path's midpoint, which is the same
-  // geometric point every routed edge's lane would otherwise also target —
-  // jitter alone (spreading routed edges from each other) still leaves them
-  // colliding with that uncontrollable third label. Sitting off-center
-  // dodges it structurally instead of hoping jitter happens to miss it.
-  // One function per gap (not per rank-and-direction) so laneBelow(r) and
-  // laneAbove(r+1) — the same physical gap approached from opposite sides —
-  // still agree exactly, or an adjacent-rank pair would never qualify for
-  // buildLanePath's same-lane case and would detour via the highway for no
-  // reason.
-  const gapLaneY = (topRank) => rankBottoms[topRank] + 0.32 * (rankTops[topRank + 1] - rankBottoms[topRank]);
+  // True center of the gap — a lane biased toward either end reads as "the
+  // arrow is jammed against a card" rather than "routed through the middle
+  // of the gap between ranks". Label-vs-label separation (including against
+  // a primary edge's own uncontrollable auto-placed label) is `labelOffset`'s
+  // job instead, which slides only the label, not the line, along its
+  // segment. One function per gap (not per rank-and-direction) so
+  // laneBelow(r) and laneAbove(r+1) — the same physical gap approached from
+  // opposite sides — still agree exactly, or an adjacent-rank pair would
+  // never qualify for buildLanePath's same-lane case and would detour via
+  // the highway for no reason.
+  const gapLaneY = (topRank) => (rankBottoms[topRank] + rankTops[topRank + 1]) / 2;
   const laneBelow = (rank) => gapLaneY(rank);
   const laneAbove = (rank) => gapLaneY(rank - 1);
 
@@ -150,7 +158,7 @@ function buildRankRouting(sourceId, targetId, positionsById, rankIndexById, rank
     const exitY = side === "bottom" ? source.y + NODE_HEIGHT / 2 : source.y - NODE_HEIGHT / 2;
     const enterY = side === "bottom" ? target.y + NODE_HEIGHT / 2 : target.y - NODE_HEIGHT / 2;
     const laneY = side === "bottom" ? laneBelow(sourceRank) : laneAbove(sourceRank);
-    return buildLanePath(source.x, exitY, laneY, target.x, enterY, laneY, highwayX, jitter);
+    return buildLanePath(source.x, exitY, laneY, target.x, enterY, laneY, highwayX, jitter, labelOffset);
   }
 
   // positionsById holds dagre's *center* coordinates, so the top/bottom edge
@@ -161,7 +169,63 @@ function buildRankRouting(sourceId, targetId, positionsById, rankIndexById, rank
   const sourceLaneY = sourceBelowTarget ? laneAbove(sourceRank) : laneBelow(sourceRank);
   const targetLaneY = sourceBelowTarget ? laneBelow(targetRank) : laneAbove(targetRank);
 
-  return buildLanePath(source.x, sourceExitY, sourceLaneY, target.x, targetEnterY, targetLaneY, highwayX, jitter);
+  return buildLanePath(
+    source.x,
+    sourceExitY,
+    sourceLaneY,
+    target.x,
+    targetEnterY,
+    targetLaneY,
+    highwayX,
+    jitter,
+    labelOffset,
+  );
+}
+
+// A fixed per-edge label offset looks separated in flow-space coordinates
+// but fitView's zoom-to-fit scale (often well under 1x once a graph has more
+// than a few turns) shrinks that same offset on screen, right back into
+// collision — this is what kept two labels landing on top of each other
+// however far apart their *un-scaled* offsets looked. Estimating each
+// label's actual rendered box and checking it against every label already
+// placed is scale-independent: it reasons about the same pixel sizes the
+// browser will really draw, not a guessed offset.
+const LABEL_CHAR_WIDTH = 6;
+const LABEL_HEIGHT = 16;
+const LABEL_OFFSET_STEPS = [0, 70, -70, 140, -140, 210, -210, 280, -280, 350, -350];
+
+function estimateLabelRect(text, centerX, centerY) {
+  const width = text.length * LABEL_CHAR_WIDTH + 10;
+  return { x: centerX - width / 2, y: centerY - LABEL_HEIGHT / 2, w: width, h: LABEL_HEIGHT };
+}
+
+function rectsOverlap(a, b) {
+  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + a.h && b.y < a.y + b.h;
+}
+
+// Tries each candidate label offset in turn and keeps the first whose
+// estimated label rect doesn't collide with any already-placed one (falling
+// back to the last candidate tried if every one collides, so a very busy
+// gap still gets *a* position rather than none) — greedy and order-
+// dependent, but that's fine here: edges are processed in a stable order,
+// so the same graph always resolves to the same layout.
+function pickLabelOffset(buildRouted, labelText, placedRects) {
+  let chosen = null;
+  for (const candidate of LABEL_OFFSET_STEPS) {
+    const routed = buildRouted(candidate);
+    if (!routed) {
+      continue;
+    }
+    const rect = estimateLabelRect(labelText, routed.labelX, routed.labelY);
+    chosen = { routed, rect };
+    if (!placedRects.some((placed) => rectsOverlap(rect, placed))) {
+      break;
+    }
+  }
+  if (chosen) {
+    placedRects.push(chosen.rect);
+  }
+  return chosen?.routed ?? null;
 }
 
 function buildFlowLayout(nodes, edges, selectedTurnId, pendingTurnId) {
@@ -224,6 +288,15 @@ function buildFlowLayout(nodes, edges, selectedTurnId, pendingTurnId) {
     ),
   );
 
+  // Every edge is routed through the lane system now, primary ones included
+  // — a primary edge is a plain built-in smoothstep whose label React Flow
+  // positions internally with no way to hand it an offset, which is exactly
+  // what kept it landing on top of whatever a routed edge's own (uncoordinated)
+  // offset produced. A primary edge is always exactly one rank from its
+  // child (dagre only sees edges I feed it, one per node), so it always
+  // qualifies for the plain same-lane path here — no highway detour risk
+  // from including it.
+  const placedLabelRects = [];
   const flowEdges = edges.map((edge, index) => {
     const color = edgeColors[edge.label] ?? "#94a3b8";
     const edgeKey = `${edge.fromTurnId}:${edge.toTurnId}:${edge.label}`;
@@ -232,19 +305,33 @@ function buildFlowLayout(nodes, edges, selectedTurnId, pendingTurnId) {
     const isBidirectionalRelated = edge.label === "related";
     const sourceId = String(edge.fromTurnId);
     const targetId = String(edge.toTurnId);
-    // Spread parallel edges' lanes (and labels) apart in a repeating cycle
-    // rather than by raw array index, which only offset by 1px per edge —
-    // barely enough to keep two labels from sitting on top of each other.
+    // Spread parallel edges' lines apart a little — kept small (unlike the
+    // label offset below) so the lane still reads as centered in the gap
+    // rather than jammed toward either card.
     const jitter = ((index % 5) - 2) * 10;
-    const routed = isBranchLike
-      ? buildRankRouting(sourceId, targetId, positionsById, rankIndexById, rankTops, rankBottoms, highways, jitter)
-      : null;
+    const labelText = `${edge.label} ${edge.confidence.toFixed(2)}${edge.origin === "manual" ? " · pinned" : ""}`;
+    const routed = pickLabelOffset(
+      (labelOffset) =>
+        buildRankRouting(
+          sourceId,
+          targetId,
+          positionsById,
+          rankIndexById,
+          rankTops,
+          rankBottoms,
+          highways,
+          jitter,
+          labelOffset,
+        ),
+      labelText,
+      placedLabelRects,
+    );
     return {
       id: String(edge.id ?? `${edge.fromTurnId}-${edge.toTurnId}-${edge.label}`),
       source: sourceId,
       target: targetId,
       type: routed ? "routed" : isBranchLike ? "bezier" : "smoothstep",
-      label: `${edge.label} ${edge.confidence.toFixed(2)}${edge.origin === "manual" ? " · pinned" : ""}`,
+      label: labelText,
       data: {
         edgeId: edge.id,
         origin: edge.origin,

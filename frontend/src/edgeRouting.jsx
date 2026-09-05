@@ -48,7 +48,27 @@ export const edgeTypes = { routed: RoutedEdge };
 // (exit, into the lane, across, into the target). When they differ, the path
 // detours through `highwayX` — a fixed x past every node — to get from one
 // lane to the other without cutting back across intervening node columns.
-export function buildLanePath(sourceX, sourceExitY, sourceLaneY, targetX, targetEnterY, targetLaneY, highwayX, jitter = 0) {
+//
+// `jitter` nudges the line itself (kept small — it still has to read as
+// "roughly centered in the gap", not jammed against either node) so two
+// routed edges sharing a lane don't draw exactly on top of each other.
+// `labelOffset` only moves the label, slid along whichever segment the
+// label sits on (the horizontal run for a same-lane path, the vertical
+// highway run otherwise) — it can be much larger than `jitter` without
+// making the line itself look off-center, which is what actually separates
+// a label from another edge's label, or from a primary (non-routed) edge's
+// own automatically-placed one that a small `jitter` can't move at all.
+export function buildLanePath(
+  sourceX,
+  sourceExitY,
+  sourceLaneY,
+  targetX,
+  targetEnterY,
+  targetLaneY,
+  highwayX,
+  jitter = 0,
+  labelOffset = 0,
+) {
   const jitteredSourceLaneY = sourceLaneY + jitter;
   const jitteredTargetLaneY = targetLaneY + jitter;
 
@@ -60,7 +80,7 @@ export function buildLanePath(sourceX, sourceExitY, sourceLaneY, targetX, target
         `L ${targetX} ${jitteredTargetLaneY}`,
         `L ${targetX} ${targetEnterY}`,
       ].join(" "),
-      labelX: (sourceX + targetX) / 2,
+      labelX: (sourceX + targetX) / 2 + labelOffset,
       labelY: jitteredSourceLaneY,
     };
   }
@@ -76,6 +96,6 @@ export function buildLanePath(sourceX, sourceExitY, sourceLaneY, targetX, target
       `L ${targetX} ${targetEnterY}`,
     ].join(" "),
     labelX: jitteredHighwayX,
-    labelY: (jitteredSourceLaneY + jitteredTargetLaneY) / 2,
+    labelY: (jitteredSourceLaneY + jitteredTargetLaneY) / 2 + labelOffset,
   };
 }
