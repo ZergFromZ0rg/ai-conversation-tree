@@ -324,12 +324,15 @@ button {
 }
 
 .iconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: none;
   background: none;
   color: var(--text-muted);
   font-size: 18px;
   line-height: 1;
-  padding: 6px 8px;
+  padding: 7px;
   border-radius: 8px;
 }
 
