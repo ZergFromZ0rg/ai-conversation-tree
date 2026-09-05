@@ -271,6 +271,7 @@ export function App() {
         onDelete={deleteConversation}
         isOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
+        onToggle={() => setSidebarOpen((open) => !open)}
       />
 
       <main className={`chatColumn${drawerOpen ? " chatColumnWithDrawer" : ""}`}>

@@ -125,6 +125,8 @@ function buildRankRouting(
   highways,
   jitter,
   labelOffset,
+  sourceExitXOffset = 0,
+  targetEnterXOffset = 0,
 ) {
   const source = positionsById.get(sourceId);
   const target = positionsById.get(targetId);
@@ -133,6 +135,16 @@ function buildRankRouting(
   if (!source || !target) {
     return null;
   }
+
+  // Every edge touches its node at that node's exact center by default — fine
+  // for one edge, but when several land on the same node they'd all funnel
+  // into that one point and read as a single merged arrow right where it
+  // matters most (at the card). sourceExitXOffset/targetEnterXOffset nudge
+  // just the touch point sideways (not the node, not the rank/highway
+  // decisions below, which stay based on the node's true center) so each
+  // one visibly lands somewhere different along the card's edge.
+  const sourceTouchX = source.x + sourceExitXOffset;
+  const targetTouchX = target.x + targetEnterXOffset;
 
   const midX = (source.x + target.x) / 2;
   const highwayX = Math.abs(midX - highways.left) <= Math.abs(highways.right - midX) ? highways.left : highways.right;
@@ -158,7 +170,7 @@ function buildRankRouting(
     const exitY = side === "bottom" ? source.y + NODE_HEIGHT / 2 : source.y - NODE_HEIGHT / 2;
     const enterY = side === "bottom" ? target.y + NODE_HEIGHT / 2 : target.y - NODE_HEIGHT / 2;
     const laneY = side === "bottom" ? laneBelow(sourceRank) : laneAbove(sourceRank);
-    return buildLanePath(source.x, exitY, laneY, target.x, enterY, laneY, highwayX, jitter, labelOffset);
+    return buildLanePath(sourceTouchX, exitY, laneY, targetTouchX, enterY, laneY, highwayX, jitter, labelOffset);
   }
 
   // positionsById holds dagre's *center* coordinates, so the top/bottom edge
@@ -170,10 +182,10 @@ function buildRankRouting(
   const targetLaneY = sourceBelowTarget ? laneBelow(targetRank) : laneAbove(targetRank);
 
   return buildLanePath(
-    source.x,
+    sourceTouchX,
     sourceExitY,
     sourceLaneY,
-    target.x,
+    targetTouchX,
     targetEnterY,
     targetLaneY,
     highwayX,
@@ -297,6 +309,31 @@ function buildFlowLayout(nodes, edges, selectedTurnId, pendingTurnId) {
   // qualifies for the plain same-lane path here — no highway detour risk
   // from including it.
   const placedLabelRects = [];
+
+  // A node with several incoming (or outgoing) edges would otherwise have
+  // every one of them touch it at the exact same center point, reading as
+  // one merged arrow right where it matters most. Spread each group's touch
+  // points evenly across the card's edge instead.
+  const FAN_SPACING = 24;
+  function fanOffsetsByEdgeIndex(keyFn) {
+    const groups = new Map();
+    edges.forEach((edge, i) => {
+      const key = keyFn(edge);
+      const list = groups.get(key) ?? [];
+      list.push(i);
+      groups.set(key, list);
+    });
+    const offsetByIndex = new Map();
+    for (const indices of groups.values()) {
+      const n = indices.length;
+      indices.forEach((edgeIndex, position) => {
+        offsetByIndex.set(edgeIndex, (position - (n - 1) / 2) * FAN_SPACING);
+      });
+    }
+    return offsetByIndex;
+  }
+  const sourceExitOffsets = fanOffsetsByEdgeIndex((edge) => edge.fromTurnId);
+  const targetEnterOffsets = fanOffsetsByEdgeIndex((edge) => edge.toTurnId);
   const flowEdges = edges.map((edge, index) => {
     const color = edgeColors[edge.label] ?? "#94a3b8";
     const edgeKey = `${edge.fromTurnId}:${edge.toTurnId}:${edge.label}`;
@@ -309,6 +346,8 @@ function buildFlowLayout(nodes, edges, selectedTurnId, pendingTurnId) {
     // label offset below) so the lane still reads as centered in the gap
     // rather than jammed toward either card.
     const jitter = ((index % 5) - 2) * 10;
+    const sourceExitXOffset = sourceExitOffsets.get(index) ?? 0;
+    const targetEnterXOffset = targetEnterOffsets.get(index) ?? 0;
     const labelText = `${edge.label} ${edge.confidence.toFixed(2)}${edge.origin === "manual" ? " · pinned" : ""}`;
     const routed = pickLabelOffset(
       (labelOffset) =>
@@ -322,6 +361,8 @@ function buildFlowLayout(nodes, edges, selectedTurnId, pendingTurnId) {
           highways,
           jitter,
           labelOffset,
+          sourceExitXOffset,
+          targetEnterXOffset,
         ),
       labelText,
       placedLabelRects,
@@ -345,7 +386,11 @@ function buildFlowLayout(nodes, edges, selectedTurnId, pendingTurnId) {
       style: {
         stroke: color,
         strokeWidth: edge.label === "continuation" && isPrimaryEdge ? 2.8 : 2,
-        strokeDasharray: edge.label === "related" || !isPrimaryEdge ? "6 4" : undefined,
+        // Dash pattern reads as "this relationship type" (related is a
+        // lateral/soft link), not "this is the primary vs. a weaker
+        // duplicate" — the same label should look the same everywhere.
+        // Primary-vs-duplicate is still visible via strokeWidth + zIndex.
+        strokeDasharray: edge.label === "related" ? "6 4" : undefined,
       },
       labelStyle: { fill: color, fontSize: 11, fontWeight: 600 },
       labelBgStyle: { fill: "var(--graph-label-bg)", fillOpacity: 1 },

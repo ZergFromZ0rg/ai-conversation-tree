@@ -115,11 +115,27 @@ button {
 }
 
 @media (min-width: 861px) {
+  /* A slim strip, not width: 0 — the toggle button lives inside the sidebar
+     now (not the chat header), so collapsing it all the way to nothing
+     would take the only way to reopen it with it. */
   .sidebarCollapsed {
-    width: 0;
+    width: 60px;
+    padding-left: 6px;
+    padding-right: 6px;
+  }
+
+  .sidebarCollapsed .sidebarHeader {
     padding-left: 0;
     padding-right: 0;
-    border-right: none;
+  }
+
+  /* Hide outright, not just clip — text content still overflows its own
+     box even though the sidebar's overflow: hidden catches the rest,
+     showing a stray sliver of "New ch..." or "AI Conv...". Only the
+     toggle button in the header should show. */
+  .sidebarCollapsed .sidebarContent,
+  .sidebarCollapsed .sidebarBrand {
+    display: none;
   }
 }
 
@@ -130,12 +146,17 @@ button {
   padding: 4px 6px;
 }
 
+.sidebarToggleButton {
+  flex-shrink: 0;
+}
+
 .sidebarBrand {
   display: flex;
   align-items: center;
   gap: 8px;
   font-weight: 650;
   font-size: 14px;
+  white-space: nowrap;
 }
 
 .sidebarBrandMark {
@@ -143,8 +164,12 @@ button {
   color: var(--accent);
 }
 
-.sidebarCloseButton {
-  display: none;
+.sidebarContent {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 8px;
 }
 
 .newChatButton {
@@ -311,6 +336,13 @@ button {
 .iconButton:hover {
   background: var(--bg-hover);
   color: var(--text);
+}
+
+/* Desktop opens/closes the sidebar via its own in-panel toggle now; the
+   chat header's hamburger is only needed on mobile, to open the sidebar
+   overlay from outside it in the first place. */
+.menuButton {
+  display: none;
 }
 
 /* ---------- transcript ---------- */
@@ -1254,10 +1286,6 @@ button {
   .sidebarOpen {
     transform: translateX(0);
     box-shadow: var(--shadow);
-  }
-
-  .sidebarCloseButton {
-    display: block;
   }
 
   .sidebarBackdrop {

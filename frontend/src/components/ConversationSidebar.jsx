@@ -40,13 +40,26 @@ export function ConversationSidebar({
   onDelete,
   isOpen,
   onClose,
+  onToggle,
 }) {
   return (
     <>
       <div className={`sidebarBackdrop${isOpen ? " sidebarBackdropVisible" : ""}`} onClick={onClose} />
-      <aside className={`sidebar${isOpen ? " sidebarOpen" : " sidebarCollapsed"}`} aria-hidden={!isOpen}>
+      <aside className={`sidebar${isOpen ? " sidebarOpen" : " sidebarCollapsed"}`}>
         <div className="sidebarHeader">
-          <span className="sidebarBrand">
+          {/* First in the DOM so it stays visible in the collapsed strip —
+              justify-content: space-between keeps it flush left, and the
+              sidebar's own overflow: hidden clips everything after it once
+              the sidebar narrows. */}
+          <button
+            type="button"
+            className="iconButton sidebarToggleButton"
+            aria-label={isOpen ? "Hide conversation list" : "Show conversation list"}
+            onClick={onToggle}
+          >
+            ☰
+          </button>
+          <span className="sidebarBrand" aria-hidden={!isOpen}>
             <svg
               className="sidebarBrandMark"
               width="16"
@@ -67,29 +80,28 @@ export function ConversationSidebar({
             </svg>
             AI Conversation Tree
           </span>
-          <button type="button" className="iconButton sidebarCloseButton" aria-label="Close menu" onClick={onClose}>
-            ×
-          </button>
         </div>
 
-        <button type="button" className="newChatButton" onClick={onCreate}>
-          <span aria-hidden="true">＋</span> New chat
-        </button>
+        <div className="sidebarContent" aria-hidden={!isOpen}>
+          <button type="button" className="newChatButton" onClick={onCreate} tabIndex={isOpen ? 0 : -1}>
+            <span aria-hidden="true">＋</span> New chat
+          </button>
 
-        <div className="conversationList">
-          {conversations.length === 0 ? (
-            <p className="sidebarEmpty">No conversations yet.</p>
-          ) : (
-            conversations.map((conversation) => (
-              <ConversationRow
-                key={conversation.id}
-                conversation={conversation}
-                isActive={conversation.id === conversationId}
-                onSelect={onSelect}
-                onDelete={onDelete}
-              />
-            ))
-          )}
+          <div className="conversationList">
+            {conversations.length === 0 ? (
+              <p className="sidebarEmpty">No conversations yet.</p>
+            ) : (
+              conversations.map((conversation) => (
+                <ConversationRow
+                  key={conversation.id}
+                  conversation={conversation}
+                  isActive={conversation.id === conversationId}
+                  onSelect={onSelect}
+                  onDelete={onDelete}
+                />
+              ))
+            )}
+          </div>
         </div>
       </aside>
     </>
