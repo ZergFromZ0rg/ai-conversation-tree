@@ -282,7 +282,14 @@ export function App() {
             aria-label={sidebarOpen ? "Hide conversation list" : "Show conversation list"}
             onClick={() => setSidebarOpen((open) => !open)}
           >
-            ☰
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path
+                d="M2 4h12M2 8h12M2 12h12"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+              />
+            </svg>
           </button>
           <span className="chatTitle">
             {activeConversation?.title || (conversationId ? `Conversation ${conversationId}` : "AI Conversation Tree")}

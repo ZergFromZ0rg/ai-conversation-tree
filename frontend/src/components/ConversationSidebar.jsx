@@ -57,7 +57,17 @@ export function ConversationSidebar({
             aria-label={isOpen ? "Hide conversation list" : "Show conversation list"}
             onClick={onToggle}
           >
-            ☰
+            {/* An actual drawn icon, not the "☰" glyph — that character's bar
+                spacing is up to the system font and can render visibly
+                uneven. */}
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path
+                d="M2 4h12M2 8h12M2 12h12"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+              />
+            </svg>
           </button>
           <span className="sidebarBrand" aria-hidden={!isOpen}>
             <svg
