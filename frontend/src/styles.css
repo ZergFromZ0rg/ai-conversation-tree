@@ -127,6 +127,11 @@ button {
   .sidebarCollapsed .sidebarHeader {
     padding-left: 0;
     padding-right: 0;
+    /* justify-content: space-between still left-aligns a *lone* flex child
+       (the brand span is display: none here) — nothing to space it
+       against, so it sits at the start instead of splitting the header's
+       leftover width evenly on both sides of the button. */
+    justify-content: center;
   }
 
   /* Hide outright, not just clip — text content still overflows its own
