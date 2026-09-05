@@ -126,8 +126,21 @@ function buildRankRouting(sourceId, targetId, positionsById, rankIndexById, rank
 
   const midX = (source.x + target.x) / 2;
   const highwayX = Math.abs(midX - highways.left) <= Math.abs(highways.right - midX) ? highways.left : highways.right;
-  const laneBelow = (rank) => (rankBottoms[rank] + rankTops[rank + 1]) / 2;
-  const laneAbove = (rank) => (rankTops[rank] + rankBottoms[rank - 1]) / 2;
+  // Biased toward the top of the gap (not the exact midpoint): a primary
+  // edge between adjacent ranks is a plain smoothstep whose own automatic
+  // label React Flow places at that path's midpoint, which is the same
+  // geometric point every routed edge's lane would otherwise also target —
+  // jitter alone (spreading routed edges from each other) still leaves them
+  // colliding with that uncontrollable third label. Sitting off-center
+  // dodges it structurally instead of hoping jitter happens to miss it.
+  // One function per gap (not per rank-and-direction) so laneBelow(r) and
+  // laneAbove(r+1) — the same physical gap approached from opposite sides —
+  // still agree exactly, or an adjacent-rank pair would never qualify for
+  // buildLanePath's same-lane case and would detour via the highway for no
+  // reason.
+  const gapLaneY = (topRank) => rankBottoms[topRank] + 0.32 * (rankTops[topRank + 1] - rankBottoms[topRank]);
+  const laneBelow = (rank) => gapLaneY(rank);
+  const laneAbove = (rank) => gapLaneY(rank - 1);
 
   if (sourceRank === targetRank) {
     // Both ends leave from the same side of their rank — whichever gap is
@@ -219,8 +232,12 @@ function buildFlowLayout(nodes, edges, selectedTurnId, pendingTurnId) {
     const isBidirectionalRelated = edge.label === "related";
     const sourceId = String(edge.fromTurnId);
     const targetId = String(edge.toTurnId);
+    // Spread parallel edges' lanes (and labels) apart in a repeating cycle
+    // rather than by raw array index, which only offset by 1px per edge —
+    // barely enough to keep two labels from sitting on top of each other.
+    const jitter = ((index % 5) - 2) * 10;
     const routed = isBranchLike
-      ? buildRankRouting(sourceId, targetId, positionsById, rankIndexById, rankTops, rankBottoms, highways, index)
+      ? buildRankRouting(sourceId, targetId, positionsById, rankIndexById, rankTops, rankBottoms, highways, jitter)
       : null;
     return {
       id: String(edge.id ?? `${edge.fromTurnId}-${edge.toTurnId}-${edge.label}`),

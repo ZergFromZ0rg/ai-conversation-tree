@@ -945,6 +945,12 @@ button {
 
 .turnNodePreview {
   font-size: 11px;
+  line-height: 1.55;
+  /* Reserve space for 2 lines even when the preview is shorter, so every
+     card renders at the same height — TurnGraph's edge routing assumes a
+     fixed card height (NODE_HEIGHT) to compute where an edge should touch
+     a card's border, and a shorter real card would leave a gap there. */
+  min-height: calc(2 * 1.55 * 11px);
   color: var(--text-muted);
   display: -webkit-box;
   -webkit-line-clamp: 2;
