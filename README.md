@@ -14,6 +14,8 @@ Current goals:
 
 This is not intended to be production-ready. It is intended to be technically solid, explainable, and useful as a portfolio project.
 
+![The conversation graph drawer: a six-turn chat split into two threads, its turns linked by continuation and branch edges, with an "also discussed elsewhere" panel below.](docs/images/conversation-graph.png)
+
 ## What It Does
 
 For each new turn, the system decides whether it is:
@@ -359,6 +361,8 @@ Semantics:
 The viewer at `/ui` is a normal chat: a conversation list on the left, the
 transcript in the middle, a composer at the bottom.
 
+![The chat viewer: conversation list on the left, transcript in the middle, model picker and composer at the bottom.](docs/images/chat-view.png)
+
 The composer has a model picker populated from `GET /models`. Choosing a model
 sends it with each turn and stores it as the conversation's default; a new chat
 inherits the current selection, and switching conversations adopts that
@@ -389,6 +393,8 @@ The `Map` button in the chat header opens a full-screen workspace map: every
 concept across every conversation as a node, laid out in a grid clustered and
 coloured by conversation, with the cross-conversation concept links as edges.
 Clicking a concept switches to that conversation.
+
+![The workspace map: concepts from four conversations clustered by colour, joined by cross-conversation concept links.](docs/images/workspace-map.png)
 
 Every row of clusters has a genuinely empty gap above and below it (nothing is
 ever drawn there); an edge between two nodes that a straight line would cut
