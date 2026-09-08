@@ -65,6 +65,8 @@ clarificationPatterns = [
     "how so",
     "why",
     "does that mean",
+    "what does",
+    "mean",
 ]
 
 referencePatterns = [
@@ -565,16 +567,24 @@ def judgeEdgeLabel(
     # bar the embedding gate itself uses elsewhere — not a specific 0.3 on one
     # particular signal, which a verbose or tangential real answer can easily
     # miss despite the reference being unambiguous.
+    # Every dependency cue needs at least a trace of shared topic under it, or
+    # a bare "why ...?" / "what do you mean ...?" on a hard topic switch ("why
+    # is the sky blue?" after a CI question) reads as a branch off nothing.
+    grounded = _maxTopicalSignal(similarity, features) >= minEmbeddingFloor
     hasDependencySignal = (
-        features["clarificationScore"] > 0
-        or features["referenceScore"] > 0
-        or (
-            features["pronounReferenceScore"] > 0
-            and _maxTopicalSignal(similarity, features) >= minEmbeddingFloor
-        )
+        (grounded and (features["clarificationScore"] > 0 or features["referenceScore"] > 0))
+        or (features["pronounReferenceScore"] > 0 and grounded)
         or (
             features["followupQuestionScore"] > 0
             and features["answerSimilarity"] >= parallelDefinitionRelatedThreshold
+        )
+        or (
+            # The label-specific cross-encoder is a query/passage relevance
+            # model: a confident "branch" score means the new question is
+            # answerable straight from the last answer — a branch follow-up
+            # even with no explicit "what do you mean" marker.
+            crossScores["branch"] >= crossCandidateThreshold
+            and grounded
         )
     )
     # A bare pronoun reference (no clarification/reference marker alongside
@@ -595,6 +605,15 @@ def judgeEdgeLabel(
             and features["answerSimilarity"] >= parallelDefinitionRelatedThreshold
         )
         or (hasBarePronounReference and _maxTopicalSignal(similarity, features) >= minEmbeddingFloor)
+        or (
+            # Stays plainly on the same topic (strong raw embedding overlap
+            # with the prior turn or its answer) with no lateral-shift or
+            # comparison marker — deepening the thread, e.g. "what happens
+            # during the TLS handshake itself?" after a question about HTTPS.
+            max(similarity, features["answerSimilarity"]) >= relatedSimilarityThreshold
+            and features["topicShiftScore"] == 0
+            and features["comparisonScore"] == 0
+        )
     )
     hasRelatedSignal = (
         features["topicShiftScore"] > 0
@@ -624,6 +643,13 @@ def judgeEdgeLabel(
                 features["referenceScore"] + features["clarificationScore"] + 0.5 * features["pronounReferenceScore"],
             )
         )
+        if crossScores["branch"] >= crossCandidateThreshold and grounded:
+            # A confident cross-encoder branch score is strong standalone
+            # evidence; a flat heuristic score shouldn't bury it.
+            confidences["branch"] = max(
+                confidences["branch"],
+                0.4 + 0.3 * crossScores["branch"] + 0.1 * features["answerSimilarity"],
+            )
 
     if hasContinuationSignal:
         heuristicConfidence = scoreToConfidence(labelScores["continuation"], continuationMinScore)
@@ -634,6 +660,30 @@ def judgeEdgeLabel(
             + 0.1 * features["userTopicSimilarity"]
             + 0.05 * min(1.0, features["forwardScore"] + features["comparisonScore"])
         )
+        if (
+            max(similarity, features["answerSimilarity"]) >= relatedSimilarityThreshold
+            and features["topicShiftScore"] == 0
+            and features["comparisonScore"] == 0
+        ):
+            # Same-topic deepening with no discourse marker: keep it above the
+            # commit bar on embedding evidence alone.
+            confidences["continuation"] = max(
+                confidences["continuation"],
+                0.4 + 0.25 * max(similarity, features["answerSimilarity"]),
+            )
+        if (
+            hasBarePronounReference
+            and features["topicShiftScore"] == 0
+            and features["comparisonScore"] == 0
+        ):
+            # A bare "...that behaviour?" / "...it?" pointing back at the prior
+            # turn is unambiguous reference; the bi-encoder often scores the
+            # terse follow-up low, so lean on the reference plus whatever
+            # topical trace there is rather than on similarity alone.
+            confidences["continuation"] = max(
+                confidences["continuation"],
+                0.4 + 0.3 * _maxTopicalSignal(similarity, features),
+            )
 
     if (
         hasRelatedSignal
@@ -653,6 +703,14 @@ def judgeEdgeLabel(
                 # still shows the lateral shift is topically grounded.
                 features["topicShiftScore"] > 0
                 and _maxTopicalSignal(similarity, features) >= minEmbeddingFloor
+            )
+            or (
+                # A lateral question with no "what about" marker but real
+                # surface anchoring to the prior topic (shared content terms
+                # plus topical overlap) — e.g. "how is full-text search done
+                # in MySQL?" after a Postgres full-text-index question.
+                features["userTopicSimilarity"] >= strongTopicSimilarityThreshold
+                and features["contentOverlap"] >= strongContentOverlapThreshold
             )
         )
     ):

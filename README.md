@@ -589,6 +589,12 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 venv/bin/python eval_concept_links.py
 classification; `eval_concept_links.py` builds small conversations in throwaway
 databases and checks which ones end up cross-linked.
 
+`eval_cases.json` drives `eval_immediate_previous.py` (27 graded cases across
+`continuation` / `branch` / `related` / `unrelated`). Cases marked `knownGap`
+are printed but not graded — pairs the `all-MiniLM-L6-v2` bi-encoder scores
+near zero (anaphora with no shared terms, acronyms it doesn't know). If one
+starts passing, the runner says so; promote it to a graded case then.
+
 Frontend build:
 
 ```bash

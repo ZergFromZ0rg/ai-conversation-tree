@@ -65,6 +65,25 @@ def main():
             ],
             set(),
         ),
+        (
+            "older related retrieval past an interleaved topic",
+            [
+                ("What is a Python list?", "An ordered, mutable sequence of values."),
+                ("How do I center a div?", "Use flexbox with justify-content and align-items."),
+                ("What is a Python dictionary?", "A mapping from keys to values."),
+            ],
+            {(0, "related")},
+        ),
+        (
+            "no older link across an unrelated interleaved history",
+            [
+                ("How do I write a for loop in Python?", "Use 'for item in iterable:' and indent the body."),
+                ("What is photosynthesis?", "Plants converting light into chemical energy."),
+                ("What is the offside rule in football?", "An attacker must not be past the last defender when the ball is played."),
+                ("How do I bake sourdough bread?", "Feed a starter, mix, bulk ferment, shape, proof, and bake."),
+            ],
+            set(),
+        ),
     ]
 
     correct = 0

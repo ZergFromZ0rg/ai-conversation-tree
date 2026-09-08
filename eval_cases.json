@@ -61,5 +61,158 @@
     "previousAiText": "Leaves are green because chlorophyll reflects green light.",
     "userText": "How do I set up Postgres next?",
     "expectedLabel": "unrelated"
+  },
+  {
+    "name": "continuation shrink image",
+    "previousUserText": "How do I containerise a Node app?",
+    "previousAiText": "Write a Dockerfile that installs dependencies and sets the start command.",
+    "userText": "How do I make that image smaller afterward?",
+    "expectedLabel": "continuation"
+  },
+  {
+    "name": "continuation eval after train",
+    "previousUserText": "How do I train a model in PyTorch?",
+    "previousAiText": "Define the model, loss and optimizer, then loop over batches calling backward and step.",
+    "userText": "How do I evaluate it after training?",
+    "expectedLabel": "continuation"
+  },
+  {
+    "name": "continuation deploy after build",
+    "previousUserText": "How do I build a React app for production?",
+    "previousAiText": "Run the build command, which outputs static files into a dist folder.",
+    "userText": "How do I deploy those files next?",
+    "expectedLabel": "continuation"
+  },
+  {
+    "name": "continuation tls handshake",
+    "previousUserText": "How does HTTPS keep traffic private?",
+    "previousAiText": "It encrypts the connection with TLS before any HTTP data is sent.",
+    "userText": "What happens during the TLS handshake itself?",
+    "expectedLabel": "continuation"
+  },
+  {
+    "name": "continuation isolation levels",
+    "previousUserText": "What is a database transaction?",
+    "previousAiText": "A transaction groups operations so they all succeed or all fail together.",
+    "userText": "How do isolation levels change that behaviour?",
+    "expectedLabel": "continuation"
+  },
+  {
+    "name": "continuation rest errors",
+    "previousUserText": "What is a REST API?",
+    "previousAiText": "An API that exposes resources over HTTP using verbs like GET and POST.",
+    "userText": "How should I handle errors in one?",
+    "expectedLabel": "continuation",
+    "knownGap": true,
+    "note": "Anaphoric 'in one' with no shared terms; all-MiniLM-L6-v2 scores the pair near zero."
+  },
+  {
+    "name": "branch define full table scan",
+    "previousUserText": "Why is my SQL query slow?",
+    "previousAiText": "It is doing a full table scan because the WHERE column is not indexed.",
+    "userText": "What do you mean by a full table scan?",
+    "expectedLabel": "branch"
+  },
+  {
+    "name": "branch define autoscaler",
+    "previousUserText": "How do I scale a service on Kubernetes?",
+    "previousAiText": "You raise the replica count on the Deployment, and a HorizontalPodAutoscaler can do it automatically.",
+    "userText": "What is a HorizontalPodAutoscaler exactly?",
+    "expectedLabel": "branch"
+  },
+  {
+    "name": "branch define gc roots",
+    "previousUserText": "How does garbage collection work in Java?",
+    "previousAiText": "The JVM periodically frees objects that are no longer reachable from the roots.",
+    "userText": "Which references count as roots there?",
+    "expectedLabel": "branch",
+    "knownGap": true,
+    "note": "'roots' is the only shared term and the follow-up carries no clarification marker; the bi-encoder can't bridge it."
+  },
+  {
+    "name": "branch oauth token",
+    "previousUserText": "How does OAuth work?",
+    "previousAiText": "The user authorises a client, which receives an access token it uses to call the API.",
+    "userText": "What is an access token exactly?",
+    "expectedLabel": "branch"
+  },
+  {
+    "name": "branch idempotent",
+    "previousUserText": "Which HTTP methods are safe to retry?",
+    "previousAiText": "Retrying is fine for idempotent methods like GET, PUT and DELETE.",
+    "userText": "What does idempotent mean here?",
+    "expectedLabel": "branch"
+  },
+  {
+    "name": "related unsupervised learning",
+    "previousUserText": "What is supervised learning?",
+    "previousAiText": "The model learns from labelled examples mapping inputs to known outputs.",
+    "userText": "What is unsupervised learning?",
+    "expectedLabel": "related"
+  },
+  {
+    "name": "related mobx vs redux",
+    "previousUserText": "How do I use Redux for state management?",
+    "previousAiText": "You keep one store and dispatch actions that reducers apply to it.",
+    "userText": "How does MobX handle state instead?",
+    "expectedLabel": "related"
+  },
+  {
+    "name": "related hash index",
+    "previousUserText": "What is a B-tree index?",
+    "previousAiText": "A balanced tree that keeps keys sorted so range scans are cheap.",
+    "userText": "What is a hash index?",
+    "expectedLabel": "related"
+  },
+  {
+    "name": "related quic",
+    "previousUserText": "What is TCP?",
+    "previousAiText": "A reliable, ordered transport protocol.",
+    "userText": "What is QUIC?",
+    "expectedLabel": "related",
+    "knownGap": true,
+    "note": "QUIC vs TCP needs domain knowledge the bi-encoder lacks; surface forms don't overlap."
+  },
+  {
+    "name": "related unittest",
+    "previousUserText": "How do I write unit tests in pytest?",
+    "previousAiText": "Put assert statements in functions named test_ and run pytest.",
+    "userText": "How would I do the same with unittest instead?",
+    "expectedLabel": "related"
+  },
+  {
+    "name": "related postgres mysql fts",
+    "previousUserText": "How do I add a full-text index in Postgres?",
+    "previousAiText": "Create a GIN index over a tsvector column.",
+    "userText": "How is full-text search done in MySQL?",
+    "expectedLabel": "related"
+  },
+  {
+    "name": "unrelated everest",
+    "previousUserText": "Explain dynamic programming.",
+    "previousAiText": "It solves a problem by combining solutions to overlapping subproblems, caching each one.",
+    "userText": "How tall is Mount Everest?",
+    "expectedLabel": "unrelated"
+  },
+  {
+    "name": "unrelated coffee",
+    "previousUserText": "How do I reverse a linked list?",
+    "previousAiText": "Walk the list, repointing each node's next pointer to the previous node.",
+    "userText": "How much caffeine is in a cup of coffee?",
+    "expectedLabel": "unrelated"
+  },
+  {
+    "name": "unrelated sky blue",
+    "previousUserText": "How do I set up CI with GitHub Actions?",
+    "previousAiText": "Add a workflow YAML file under .github/workflows that runs on push.",
+    "userText": "Why is the sky blue?",
+    "expectedLabel": "unrelated"
+  },
+  {
+    "name": "unrelated dinner",
+    "previousUserText": "Explain the observer pattern.",
+    "previousAiText": "Subjects keep a list of observers and notify them when their state changes.",
+    "userText": "What should I cook for dinner tonight?",
+    "expectedLabel": "unrelated"
   }
 ]
