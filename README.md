@@ -49,20 +49,42 @@ conversation.
 
 ### Immediate Previous Turn
 
-The immediate previous turn gets the strongest classifier.
+The immediate previous turn gets the strongest classifier. It combines three
+signal sources:
 
-It uses three signal sources:
+- **embedding similarity** — `all-MiniLM-L6-v2` cosine between the new user
+  message and the previous turn (`user + " " + ai`)
+- **discourse features** — regex pattern families (clarification, reference,
+  bare pronoun, forward / "how do I", comparison, lateral shift) plus lexical
+  and content-term overlap
+- **cross-encoder scores** — `cross-encoder/ms-marco-MiniLM-L-6-v2` run once
+  per candidate label with a label-specific prompt
 
-- embedding similarity
-- discourse features
-- cross-encoder scores
+Discourse features decide which labels are *eligible*; the embedding and
+cross-encoder signals set the confidence. A label is only scored when
+something anchors it to the previous turn:
 
-Those are combined to classify the relationship as:
+- `branch` — a clarification / reference / pronoun cue **with** a trace of
+  shared topic under it (so a bare "why …?" after a hard topic switch is not a
+  branch off nothing), or a confident cross-encoder `branch` score (the new
+  question is answerable straight from the last answer)
+- `continuation` — a "how do I … next" marker on an established topic, a
+  comparison follow-up, a bare pronoun pointing back, or the message just
+  staying on topic (high raw similarity to the turn or its answer) with no
+  lateral-shift marker
+- `related` — a "what about X instead" lateral shift, two parallel `what is X`
+  questions about the same area, or real surface anchoring (shared content
+  terms plus topic overlap) without a shift marker
 
-- `continuation`
-- `branch`
-- `related`
-- or no edge
+Each eligible label's confidence blends its heuristic score, its cross-encoder
+score, and the embedding similarities. The highest wins if it clears
+`edgeConfidenceThreshold` (0.45); otherwise the turn gets **no edge** and
+starts a new root.
+
+`eval_immediate_previous.py` (driven by `eval_cases.json`) grades this on 27
+cases across the four outcomes, plus 3 `knownGap` cases the bi-encoder can't
+resolve — anaphora with no shared terms, acronyms it doesn't know — which are
+reported but not graded.
 
 ### Older Prior Turns
 
@@ -110,9 +132,10 @@ unlinked by design.
 
 **Tried and rejected: blending in the cross-encoder.** The immediate-turn
 classifier gets real value from `cross-encoder/ms-marco-MiniLM-L-6-v2` (see
-below), so it seemed worth trying for concept scoring too. Measured against
-the same pairs `eval_concept_links.py`'s thresholds were tuned on
-(full questions and short label-style text alike): it reproduces cosine's
+"Immediate Previous Turn" above), so it seemed worth trying for concept
+scoring too. Measured against the same pairs `eval_concept_links.py`'s
+thresholds were tuned on (full questions and short label-style text alike): it
+reproduces cosine's
 top-3 ranking almost exactly (0.65-0.96) and returns ~0.000 for every other
 pair — including the ones cosine alone can't separate from noise, like
 "train a neural network" vs. "overfitting in machine learning" (0.239
@@ -589,11 +612,10 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 venv/bin/python eval_concept_links.py
 classification; `eval_concept_links.py` builds small conversations in throwaway
 databases and checks which ones end up cross-linked.
 
-`eval_cases.json` drives `eval_immediate_previous.py` (27 graded cases across
-`continuation` / `branch` / `related` / `unrelated`). Cases marked `knownGap`
-are printed but not graded — pairs the `all-MiniLM-L6-v2` bi-encoder scores
-near zero (anaphora with no shared terms, acronyms it doesn't know). If one
-starts passing, the runner says so; promote it to a graded case then.
+`eval_immediate_previous.py` reads its cases from `eval_cases.json` (see
+"Immediate Previous Turn" above for the graded / `knownGap` split). If a
+`knownGap` case starts passing, the runner prints `NOW PASSES` — promote it to
+a graded case and drop the flag.
 
 Frontend build:
 
