@@ -6,19 +6,21 @@ module-global state forced one lock across every conversation. This module keeps
 a small LRU of loaded graphs and hands out a per-conversation lock so writes to
 different conversations run concurrently while writes to the same one serialize.
 
-Assumes a single process (one uvicorn worker). With multiple workers the cache
-would diverge; run with --workers 1 or disable the cache.
+The cache is process-local, but every entry carries the conversation's SQLite
+`updatedAt` version. A worker rechecks that version before using its cached
+graph, so writes made by another worker invalidate stale state automatically.
 """
 
 import threading
 from collections import OrderedDict
 from contextlib import contextmanager
 
+from db import getConversationVersion
 from graphService import ConversationGraph, loadConversationGraph
 
 maxCachedGraphs = 32
 
-_cache: "OrderedDict[int, ConversationGraph]" = OrderedDict()
+_cache: "OrderedDict[int, tuple[str, ConversationGraph]]" = OrderedDict()
 _cacheLock = threading.Lock()
 _conversationLocks: dict[int, threading.RLock] = {}
 
@@ -34,15 +36,16 @@ def _conversationLock(conversationId: int) -> threading.RLock:
 
 def _cachedGraph(conversationId: int) -> ConversationGraph | None:
     with _cacheLock:
-        graph = _cache.get(conversationId)
-        if graph is not None:
+        entry = _cache.get(conversationId)
+        if entry is not None:
             _cache.move_to_end(conversationId)
-        return graph
+            return entry
+        return None
 
 
-def _storeGraph(conversationId: int, graph: ConversationGraph) -> None:
+def _storeGraph(conversationId: int, version: str, graph: ConversationGraph) -> None:
     with _cacheLock:
-        _cache[conversationId] = graph
+        _cache[conversationId] = (version, graph)
         _cache.move_to_end(conversationId)
         while len(_cache) > maxCachedGraphs:
             _cache.popitem(last=False)
@@ -57,10 +60,13 @@ def lockedGraph(conversationId: int):
     """
     lock = _conversationLock(conversationId)
     with lock:
-        graph = _cachedGraph(conversationId)
-        if graph is None:
+        version = getConversationVersion(conversationId)
+        entry = _cachedGraph(conversationId)
+        if entry is None or entry[0] != version:
             graph = loadConversationGraph(conversationId)
-            _storeGraph(conversationId, graph)
+            _storeGraph(conversationId, version or "", graph)
+        else:
+            graph = entry[1]
         yield graph
 
 

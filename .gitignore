@@ -6,3 +6,7 @@ __pycache__/
 .vscode/
 *.db-wal
 *.db-shm
+/.data/
+conversationTree.db
+conversationTree.db-wal
+conversationTree.db-shm

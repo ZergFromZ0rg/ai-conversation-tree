@@ -99,6 +99,119 @@ button {
   overflow: hidden;
 }
 
+/* ---------- analysis panel ---------- */
+
+.analysisBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 10vh 20px 20px;
+  background: rgba(10, 20, 14, 0.28);
+}
+
+.analysisPanel {
+  width: min(680px, 100%);
+  max-height: 78vh;
+  overflow: auto;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--bg);
+  box-shadow: var(--shadow);
+}
+
+.analysisHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.analysisHeader h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.analysisSearchForm {
+  display: flex;
+  gap: 8px;
+}
+
+.analysisSearchForm input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  font: inherit;
+}
+
+.analysisResults {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.analysisResult {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding: 12px;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
+.analysisResult:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.analysisResultTitle {
+  font-weight: 650;
+}
+
+.analysisResultText {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analysisResultScore,
+.analysisMuted,
+.analysisTopics {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.analysisSummary p:first-child {
+  margin-top: 0;
+}
+
+.analysisStats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.analysisStats span {
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 13px;
+}
+
 /* ---------- sidebar ---------- */
 
 .sidebar {

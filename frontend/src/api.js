@@ -34,6 +34,22 @@ export const api = {
   getConceptLinks: (conversationId) =>
     apiRequest(`/conversations/${conversationId}/concept-links`),
   getConceptGraph: () => apiRequest("/concepts/graph"),
+  getSummary: (conversationId) => apiRequest(`/conversations/${conversationId}/summary`),
+  searchConversations: (query, limit = 20) =>
+    apiRequest(`/search?query=${encodeURIComponent(query)}&limit=${limit}`),
+  downloadReport: async (conversationId, format) => {
+    const response = await fetch(`/conversations/${conversationId}/report?format=${format}`);
+    if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+    const blob = await response.blob();
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const filename = disposition.match(/filename="?([^";]+)"?/)?.[1] || `conversation-${conversationId}.${format === "json" ? "json" : "md"}`;
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  },
   createConceptLink: (aConceptKey, bConceptKey, kind) =>
     apiRequest("/concept-links", {
       method: "POST",

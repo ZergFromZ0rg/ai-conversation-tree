@@ -41,9 +41,10 @@ that conversation is scored against the concepts of every *other* conversation.
 Close pairs become `conceptLinks`, surfaced in the drawer as "also discussed
 elsewhere" and over `GET /concepts/graph`.
 
-Response generation runs through a stub, a local `Ollama` model, or `OpenAI`.
-The environment sets the default; the UI and API can override it per
-conversation.
+Response generation runs through a stub, a local `Ollama` model, `OpenAI`,
+`Anthropic`, or `Gemini`. The environment sets the default; the UI and API can
+override it per conversation. Ollama, OpenAI, and Anthropic support native
+incremental streaming; Gemini currently falls back to one response chunk.
 
 ## Core Approach
 
@@ -88,13 +89,13 @@ reported but not graded.
 
 ### Older Prior Turns
 
-Older-turn linking uses retrieval first, then classification.
+Older-turn linking uses batched vector retrieval first, then classification.
 
 Current flow:
 
-1. score every earlier turn by cosine similarity to the new turn, minus a small
+1. score earlier turn embeddings in one NumPy matrix operation, minus a small
    decay for older turns
-2. take the top few candidates
+2. keep only the top few candidates
 3. classify each selected older link as `continuation` or `related`
 
 At this scale a direct scan is cheap and avoids the concept-centroid layer,
@@ -109,7 +110,9 @@ A concept is the set of turns that share a `conceptId` inside one conversation.
 2. score two concepts as the mean of the top-3 pairwise cosine similarities
    between their member turns — top-k, not max (one stray turn pair should not
    forge a link) and not the full mean (which dilutes a broad concept)
-3. `>= 0.66` is a `same` link, `>= 0.52` is `related`; cap 3 links per concept
+3. use normalized concept centroids to shortlist candidate pairs, then apply
+   exact top-3 member scoring; `>= 0.66` is a `same` link, `>= 0.52` is
+   `related`; cap 3 links per concept
 4. concepts with no turn of at least four distinct word tokens are skipped, so
    greetings and acknowledgements do not link
 
@@ -172,7 +175,8 @@ Backend:
 - `sentence-transformers`
 - `CrossEncoder`
 - `PyTorch`
-- `Ollama` (local) or `OpenAI` for response generation; a stub mode needs neither
+- `Ollama` (local), `OpenAI`, `Anthropic`, or `Gemini` for response generation;
+  a stub mode needs neither
 
 Frontend:
 
@@ -194,6 +198,12 @@ Backend:
   - cross-conversation concept scoring, link rebuild, concept labels
 - `graphStore.py`
   - per-conversation graph cache (LRU) and per-conversation write lock
+- `vectorStore.py`
+  - optional PostgreSQL/pgvector HNSW index for scalable turn retrieval, with
+    automatic fallback to local NumPy search
+- `analysisService.py`
+  - conversation summaries, cross-chat semantic search, and Markdown/JSON
+    report generation
 - `db.py`
   - `SQLite` schema and helpers
 - `models.py`
@@ -214,7 +224,10 @@ Frontend (`frontend/src/`):
 
 ## Persistence Model
 
-Everything is saved locally in `conversationTree.db` (`SQLite`, WAL mode):
+Everything is saved locally in `.data/conversationTree.db` (`SQLite`, WAL mode)
+by default. Set `AI_CONVERSATION_TREE_DB` to choose another path. Runtime data
+is ignored by Git; the old root-level `conversationTree.db` is retained only
+as a legacy sample database.
 
 - `conversations` — `model` column holds the conversation's default response
   model (`stub`, `ollama:<name>`, or `openai:<name>`); null means use the
@@ -233,9 +246,10 @@ Everything is saved locally in `conversationTree.db` (`SQLite`, WAL mode):
   (`np.frombuffer` / `.tobytes()`), not JSON text
 
 The first request for a conversation rebuilds its in-memory `ConversationGraph`
-from persisted rows; `graphStore` then keeps it cached so subsequent turns do
-not re-read the whole history. This assumes a single backend process (one
-`uvicorn` worker).
+from persisted rows; `graphStore` then keeps it cached. Each cache entry carries
+the conversation's SQLite `updatedAt` version and is reloaded when another
+backend process changes that conversation, so multiple workers do not retain
+stale graph state.
 
 ## API
 
@@ -272,10 +286,18 @@ not re-read the whole history. This assumes a single backend process (one
   failure arrives as `{"type": "error", "message": "..."}` instead of an HTTP
   error status — by the time that can happen the response has already started
   with `200`, so there's no status left to change. `Ollama` and the stub
-  stream real token-by-token chunks; `OpenAI` doesn't (its Responses API
-  streaming protocol isn't implemented, see Current Limitations) and sends
-  its whole reply as one `delta`
+  stream incremental chunks; Gemini currently sends its whole reply as one
+  `delta`
 - `GET /conversations/{conversationId}/turns`
+
+### Analysis Endpoints
+
+- `GET /conversations/{conversationId}/summary` — deterministic local summary
+  with turn count, thread count, relationship count, and topic terms
+- `GET /search?query=...&limit=20` — semantic search across all conversations;
+  uses pgvector/HNSW by default and falls back to local NumPy search
+- `GET /conversations/{conversationId}/report?format=markdown|json` — download
+  an analysis report containing the summary, topics, turns, and semantic edges
 
 ### Graph Endpoints
 
@@ -417,6 +439,13 @@ concept across every conversation as a node, laid out in a grid clustered and
 coloured by conversation, with the cross-conversation concept links as edges.
 Clicking a concept switches to that conversation.
 
+The chat header also provides:
+
+- `Search` — semantic search across all stored conversations
+- `Summary` — a local summary of the active conversation and its detected topics
+- `Export` — downloads a Markdown analysis report; JSON reports are available
+  through the report API
+
 ![The workspace map: concepts from four conversations clustered by colour, joined by cross-conversation concept links.](docs/images/workspace-map.png)
 
 Every row of clusters has a genuinely empty gap above and below it (nothing is
@@ -453,6 +482,21 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
+
+### Optional pgvector acceleration
+
+For larger workspaces, start PostgreSQL with the included Compose file:
+
+```bash
+docker compose -f docker-compose.pgvector.yml up -d
+```
+
+That local connection is the default. Set `PGVECTOR_DATABASE_URL` when using a
+different PostgreSQL instance. On the next request, the app creates the `vector` extension, mirrors new turn
+embeddings into PostgreSQL, and uses an HNSW cosine index for older-turn
+retrieval. SQLite remains the source of truth for conversations, turns, and
+graph edges. If PostgreSQL is unavailable, retrieval automatically falls back
+to the local NumPy implementation.
 
 ### 2. Frontend build
 
@@ -625,23 +669,37 @@ cd frontend && npm run build
 
 ## Current Limitations
 
-- older-turn retrieval is a brute-force cosine scan over every prior turn's embedding in Python (fine at this scale)
-- concept linking rebuilds a workspace-wide embedding map on every change and
-  scores every concept pair; brute force, single process, fine locally
+- when pgvector is not configured, older-turn retrieval uses an exact scan over
+  the conversation's embedding matrix; the pgvector path uses HNSW ANN search
+- concept linking still uses centroid shortlists in Python; the first pgvector
+  integration covers turn retrieval, while a future pass can move workspace-wide
+  concept linking into a materialized vector index too
 - `same` vs `related` is a two-threshold heuristic; `all-MiniLM-L6-v2` cannot
   reliably separate genuinely adjacent topics from noise, so recall is
   conservative
 - a manual concept link always has kind `same` or `related` at score `1.0`;
   there's no way to record a weaker hand-made connection
 - local `Ollama` latency depends heavily on hardware and model size
-- the in-memory graph cache assumes a single backend process (one `uvicorn` worker)
-- `OpenAI` replies don't stream token by token — `streamAiText` falls back to
-  the blocking call and sends the whole reply as one SSE chunk, because
-  nothing here can exercise the Responses API's streaming format without a
-  live key
+- the graph cache is process-local but validates each entry against SQLite's
+  `updatedAt` version; SQLite still remains the write coordination point
+- Gemini replies currently fall back to one chunk; its streaming JSON protocol
+  is not yet implemented
 - no auth, multi-user isolation, or production deployment concerns are addressed
 
 ## Future Work
+
+### Conversation Intelligence
+
+Implemented:
+
+- conversation summaries with thread, edge, and topic counts
+- semantic search across all conversations
+- Markdown and JSON analysis report exports
+
+Next:
+
+- context-loss detection when an assistant response appears to ignore or
+  contradict the active conversation thread
 
 ### Browser Extension
 
@@ -661,24 +719,26 @@ Planned work:
 - per-site adapters for `ChatGPT`, `Claude`, and `Gemini`
 - local storage of extracted conversations
 - graph viewer injected as a side drawer
+- surface conversation summaries, context-loss warnings, and cross-chat search
+  from the side panel
 - optional connection to the current local backend for graph construction
 
 ### Postgres + pgvector
 
-Local `SQLite` is correct for a proof of concept. A hosted version would move to
-`Postgres` + `pgvector` for real concurrency, a proper migration path, and
-database-side approximate-nearest-neighbour search over the embeddings — used
-both by older-turn retrieval and by cross-conversation concept scoring, which
-today rebuild their similarity comparisons in Python on every change.
+The optional pgvector path now provides PostgreSQL-backed HNSW retrieval for
+turn embeddings while SQLite remains the source of truth for graph metadata.
+A future hosted migration could move the remaining graph tables to PostgreSQL
+as well, and could use a materialized vector index for cross-conversation
+concept scoring.
 
 ### Retrieval Improvements
 
-Older-turn retrieval loads every prior turn's embedding and scores it in Python
-(cosine minus a small age decay). Fine for local conversations, but linear.
+When pgvector is disabled, older-turn retrieval loads prior embeddings and
+scores them in Python (cosine minus a small age decay). The local fallback is
+intentionally retained for easy offline development.
 
 Planned improvements:
 
-- database-side vector search instead of a Python scan (see the `pgvector` note above)
 - better candidate pruning and age-decay tuning
 - optional topic/subtopic segmentation for large conversations
 
@@ -703,14 +763,14 @@ Planned work:
 
 Planned work:
 
-- real token-by-token streaming for `OpenAI` (implementing and testing the
-  Responses API's streaming SSE format needs a live key — streaming for the
-  stub and `Ollama` is done)
+- streaming support for Gemini's `streamGenerateContent` protocol
 - conversation rename (auto-titling from the first message is done)
 - graph filtering by edge type and subgraph focus
 
 ## Notes
 
-- If `conversationTree.db` comes from an older schema version, delete it once and let the app recreate it.
+- Runtime data lives in `.data/conversationTree.db` by default. Set
+  `AI_CONVERSATION_TREE_DB` to migrate or use another database path. A legacy
+  root-level `conversationTree.db` is no longer used by default.
 - If you use `Ollama`, make sure the local Ollama server is running before starting the backend.
 - For quick local testing, use a smaller Ollama model rather than a larger chat model.

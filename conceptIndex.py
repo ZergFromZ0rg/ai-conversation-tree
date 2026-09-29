@@ -38,6 +38,7 @@ relatedThreshold = 0.52
 
 topK = 3
 maxLinksPerConcept = 3
+conceptCandidateMultiplier = 8
 
 # A concept needs at least one turn with this many distinct word tokens to be
 # eligible — filters out greeting / acknowledgement concepts.
@@ -196,7 +197,7 @@ def conceptLabelsFromMembers(members: list[dict]) -> dict[tuple[int, int], str]:
 
 
 class ConceptProfile:
-    __slots__ = ("conversationId", "conceptId", "conceptKey", "embeddings", "substantive")
+    __slots__ = ("conversationId", "conceptId", "conceptKey", "embeddings", "centroid", "surfaceTerms", "substantive")
 
     def __init__(
         self,
@@ -204,12 +205,15 @@ class ConceptProfile:
         conceptId: int,
         conceptKey: str,
         embeddings: np.ndarray,
+        surfaceTerms: set[str],
         substantive: bool,
     ):
         self.conversationId = conversationId
         self.conceptId = conceptId
         self.conceptKey = conceptKey
         self.embeddings = embeddings  # (m, d) float32, L2-normalised rows
+        self.centroid = _normalizeRows(embeddings.mean(axis=0, keepdims=True))[0]
+        self.surfaceTerms = surfaceTerms
         self.substantive = substantive
 
     @property
@@ -233,6 +237,7 @@ def buildConceptProfiles(members: list[dict]) -> dict[tuple[int, int], ConceptPr
     vectors: dict[tuple[int, int], list[np.ndarray]] = {}
     substantive: dict[tuple[int, int], bool] = {}
     conceptKeys: dict[tuple[int, int], str] = {}
+    surfaceTerms: dict[tuple[int, int], set[str]] = {}
 
     for row in members:
         key = (row["conversationId"], row["conceptId"])
@@ -240,6 +245,7 @@ def buildConceptProfiles(members: list[dict]) -> dict[tuple[int, int], ConceptPr
             np.frombuffer(row["embedding"], dtype=np.float32)
         )
         substantive[key] = substantive.get(key, False) or _isSubstantive(row["userText"])
+        surfaceTerms.setdefault(key, set()).update(_labelTerms(row["userText"]))
         if row.get("conceptKey"):
             conceptKeys[key] = row["conceptKey"]
 
@@ -248,7 +254,9 @@ def buildConceptProfiles(members: list[dict]) -> dict[tuple[int, int], ConceptPr
         if key not in conceptKeys:
             continue  # no stable key on record — skip rather than link something unaddressable
         matrix = _normalizeRows(np.vstack(rows).astype(np.float32))
-        profiles[key] = ConceptProfile(key[0], key[1], conceptKeys[key], matrix, substantive[key])
+        profiles[key] = ConceptProfile(
+            key[0], key[1], conceptKeys[key], matrix, surfaceTerms.get(key, set()), substantive[key]
+        )
     return profiles
 
 
@@ -268,8 +276,12 @@ def scoreConceptPair(a: ConceptProfile, b: ConceptProfile) -> float:
     return float(topValues.mean())
 
 
-def labelForScore(score: float) -> str | None:
-    if score >= sameThreshold:
+def labelForScore(score: float, surfaceOverlap: float = 0.0) -> str | None:
+    # `same` means semantic similarity plus meaningful wording overlap. This
+    # prevents two merely adjacent topics from being promoted to same just
+    # because the embedding model is generous; semantic-only matches remain
+    # explicitly `related`.
+    if score >= sameThreshold and surfaceOverlap >= 0.35:
         return "same"
     if score >= relatedThreshold:
         return "related"
@@ -289,11 +301,21 @@ def computeLinksForConversation(
     others = [p for p in profiles.values() if p.conversationId != conversationId and p.substantive]
 
     links: list[tuple[str, str, float, str]] = []
+    candidateCount = maxLinksPerConcept * conceptCandidateMultiplier
     for target in targets:
+        rankedOthers = sorted(
+            ((float(target.centroid @ other.centroid), other) for other in others),
+            key=lambda item: item[0],
+            reverse=True,
+        )[:candidateCount]
         scored: list[tuple[float, str, ConceptProfile]] = []
-        for other in others:
+        for _, other in rankedOthers:
             score = scoreConceptPair(target, other)
-            label = labelForScore(score)
+            union = target.surfaceTerms | other.surfaceTerms
+            surfaceOverlap = (
+                len(target.surfaceTerms & other.surfaceTerms) / len(union) if union else 0.0
+            )
+            label = labelForScore(score, surfaceOverlap)
             if label is not None:
                 scored.append((score, label, other))
         scored.sort(key=lambda item: item[0], reverse=True)

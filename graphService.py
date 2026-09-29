@@ -24,6 +24,7 @@ class ConversationGraph:
     on the per-conversation lock in graphStore.
     """
 
+    conversationId: int | None = None
     turns: list[TurnModel] = field(default_factory=list)
     conceptCounter: int = 0
 
@@ -80,7 +81,28 @@ pronounReferencePatterns = [
     "that",
     "this",
     "it",
+    "one",
+    "ones",
+    "they",
+    "these",
+    "those",
 ]
+
+# Lightweight acronym expansion helps the local embedding model connect
+# common domain shorthand to its expanded form without requiring a larger LLM.
+acronymExpansions = {
+    "api": "application programming interface",
+    "db": "database",
+    "dns": "domain name system",
+    "http": "hypertext transfer protocol",
+    "https": "hypertext transfer protocol secure",
+    "oauth": "open authorization",
+    "quic": "quick udp internet connections",
+    "rest": "representational state transfer",
+    "sql": "structured query language",
+    "tls": "transport layer security",
+    "ui": "user interface",
+}
 
 forwardPatterns = [
     "how do i",
@@ -187,7 +209,12 @@ def normalizeWord(word: str) -> str:
 
 def contentTerms(text: str) -> set[str]:
     words = re.findall(r"[a-z0-9']+", text.lower())
-    return {normalizeWord(word) for word in words if word not in stopwords}
+    terms = {normalizeWord(word) for word in words if word not in stopwords}
+    for word in list(terms):
+        expansion = acronymExpansions.get(word)
+        if expansion:
+            terms.update(expansion.split())
+    return terms
 
 
 def countPatternMatches(text: str, patterns: list[str]) -> int:
@@ -449,7 +476,16 @@ def extractDiscourseFeatures(userText: str, previousUserText: str, previousAiTex
         contentOverlap = len(prevContentTerms & userContentTerms) / len(userContentTerms)
 
     # Add semantic similarities alongside phrase features so paraphrases still register.
-    userEmbedding = encodeText(userText)
+    referential = pronounReferenceScore > 0
+    semanticUserText = userText
+    if referential:
+        # Give short anaphoric follow-ups a small, local antecedent window. The
+        # original text is still used for lexical/discourse features and the
+        # cross-encoder; this only repairs the bi-encoder's lack of discourse
+        # memory for messages such as “what about that one?”
+        antecedent = " ".join((previousUserText + " " + previousAiText).split()[-36:])
+        semanticUserText = f"{userText} {antecedent}"
+    userEmbedding = encodeText(semanticUserText)
     previousUserEmbedding = encodeText(previousUserText)
     previousAiEmbedding = encodeText(previousAiText) if previousAiText.strip() else None
     userTopicSimilarity = embeddingSimilarity(userEmbedding, previousUserEmbedding)
@@ -770,20 +806,48 @@ def strongestEdgeConfidence(confidences: dict) -> float:
 # Cross-link retrieval
 
 def retrieveCrossLinkCandidates(graph: ConversationGraph, embedding, timelineParent: int | None) -> list[tuple[int, float]]:
-    # Direct top-k retrieval: score every prior turn by cosine similarity to the
-    # new turn, with a small decay for older turns. Cheap at this scale and
-    # avoids the concept-centroid layer, whose average embedding is a poor
-    # representative once a concept has drifted.
-    scored = []
-    for turn in graph.turns:
-        if turn.id == timelineParent or turn.embedding is None:
-            continue
-        similarity = embeddingSimilarity(embedding, turn.embedding)
-        agePenalty = olderTurnDecay * max(0, len(graph.turns) - 1 - turn.id)
-        scored.append((turn.id, similarity - agePenalty))
+    from vectorStore import searchConversation
 
-    scored.sort(key=lambda item: item[1], reverse=True)
-    return scored[:maxOlderCandidates]
+    pgCandidates = searchConversation(
+        conversationId=graph.conversationId,
+        embedding=embedding,
+        excludeTurnId=timelineParent,
+        limit=maxOlderCandidates * 2,
+    ) if graph.conversationId is not None else None
+    if pgCandidates:
+        return sorted(
+            [
+                (
+                    turnId,
+                    score - olderTurnDecay * max(0, len(graph.turns) - 1 - turnId),
+                )
+                for turnId, score in pgCandidates
+            ],
+            key=lambda item: item[1],
+            reverse=True,
+        )[:maxOlderCandidates]
+
+    # Batch the cosine calculation in NumPy. This keeps the hot path out of a
+    # Python loop and makes the cost proportional to one compact matrix
+    # operation. The candidate cap also prevents downstream cross-encoder
+    # calls from growing with the full conversation length.
+    eligible = [turn for turn in graph.turns if turn.id != timelineParent and turn.embedding is not None]
+    if not eligible:
+        return []
+    matrix = np.vstack([turn.embedding for turn in eligible]).astype(np.float32)
+    query = np.asarray(embedding, dtype=np.float32)
+    matrixNorms = np.linalg.norm(matrix, axis=1)
+    queryNorm = np.linalg.norm(query)
+    similarities = (matrix @ query) / np.maximum(matrixNorms * max(queryNorm, 1e-8), 1e-8)
+    agePenalty = olderTurnDecay * np.maximum(
+        0,
+        len(graph.turns) - 1 - np.asarray([turn.id for turn in eligible]),
+    )
+    scores = similarities - agePenalty
+    candidateCount = min(maxOlderCandidates, len(eligible))
+    indexes = np.argpartition(scores, -candidateCount)[-candidateCount:]
+    indexes = indexes[np.argsort(scores[indexes])[::-1]]
+    return [(eligible[int(index)].id, float(scores[int(index)])) for index in indexes]
 
 
 # Relationship analyzers
@@ -1082,7 +1146,7 @@ def reclassifyTurns(graph: ConversationGraph) -> list[TurnModel]:
 
 
 def loadConversationGraph(conversationId: int) -> ConversationGraph:
-    graph = ConversationGraph()
+    graph = ConversationGraph(conversationId=conversationId)
     storedTurns = getConversationTurns(conversationId)
 
     for storedTurn in storedTurns:

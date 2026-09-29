@@ -1,11 +1,13 @@
 import json
+import os
 import sqlite3
 import struct
 import uuid
 from pathlib import Path
 
 
-dbPath = Path(__file__).with_name("conversationTree.db")
+_defaultDataDir = Path(__file__).with_name(".data")
+dbPath = Path(os.environ.get("AI_CONVERSATION_TREE_DB", _defaultDataDir / "conversationTree.db"))
 
 
 def getConnection() -> sqlite3.Connection:
@@ -16,6 +18,7 @@ def getConnection() -> sqlite3.Connection:
 
 
 def initDb():
+    dbPath.parent.mkdir(parents=True, exist_ok=True)
     connection = getConnection()
     try:
         # WAL lets readers run concurrently with the single writer, so the
@@ -315,13 +318,25 @@ def getConversation(conversationId: int) -> dict | None:
     }
 
 
+def getConversationVersion(conversationId: int) -> str | None:
+    """Return updatedAt as a cross-process cache validation token."""
+    connection = getConnection()
+    try:
+        row = connection.execute(
+            "SELECT updatedAt FROM conversations WHERE id = ?", (conversationId,)
+        ).fetchone()
+    finally:
+        connection.close()
+    return str(row["updatedAt"]) if row is not None else None
+
+
 def setConversationModel(conversationId: int, model: str | None) -> dict | None:
     connection = getConnection()
     try:
         cursor = connection.execute(
             """
             UPDATE conversations
-            SET model = ?, updatedAt = datetime('now')
+            SET model = ?, updatedAt = strftime('%Y-%m-%d %H:%M:%f', 'now')
             WHERE id = ?
             """,
             (model, conversationId),
@@ -339,7 +354,7 @@ def setConversationTitle(conversationId: int, title: str) -> dict | None:
     connection = getConnection()
     try:
         cursor = connection.execute(
-            "UPDATE conversations SET title = ? WHERE id = ?",
+            "UPDATE conversations SET title = ?, updatedAt = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = ?",
             (title, conversationId),
         )
         connection.commit()
@@ -349,6 +364,13 @@ def setConversationTitle(conversationId: int, title: str) -> dict | None:
         connection.close()
 
     return getConversation(conversationId)
+
+
+def touchConversation(connection: sqlite3.Connection, conversationId: int) -> None:
+    connection.execute(
+        "UPDATE conversations SET updatedAt = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = ?",
+        (conversationId,),
+    )
 
 
 def deleteConversation(conversationId: int) -> bool:
@@ -400,7 +422,7 @@ def saveTurn(
         connection.execute(
             """
             UPDATE conversations
-            SET updatedAt = datetime('now')
+            SET updatedAt = strftime('%Y-%m-%d %H:%M:%f', 'now')
             WHERE id = ?
             """,
             (conversationId,),
@@ -423,6 +445,15 @@ def saveTurnEmbedding(conversationId: int, turnId: int, embeddingBytes: bytes) -
         connection.commit()
     finally:
         connection.close()
+    try:
+        import numpy as np
+        from vectorStore import upsertEmbedding
+
+        upsertEmbedding(conversationId, turnId, np.frombuffer(embeddingBytes, dtype=np.float32))
+    except Exception:
+        # PostgreSQL is an optional ANN accelerator; SQLite persistence must
+        # remain reliable when it is not configured or temporarily offline.
+        pass
 
 
 def saveSemanticEdges(conversationId: int, toTurnId: int, semanticParents: list[tuple[int, str, float]]):
@@ -552,6 +583,7 @@ def applyReclassification(
         # no old key to inherit and nothing new points at its old key) leaves
         # any conceptLinks — manual ones included — dangling.
         pruneOrphanConceptLinks(connection)
+        touchConversation(connection, conversationId)
         connection.commit()
     except Exception:
         connection.rollback()
@@ -705,6 +737,55 @@ def getAllConceptMembers() -> list[dict]:
     ]
 
 
+def getAllSearchTurns() -> list[dict]:
+    """Return lightweight turn metadata used to hydrate vector search hits."""
+    connection = getConnection()
+    try:
+        rows = connection.execute(
+            """
+            SELECT turns.conversationId, turns.turnId, turns.userText, turns.aiText,
+                   conversations.title AS conversationTitle
+            FROM turns
+            JOIN conversations ON conversations.id = turns.conversationId
+            ORDER BY turns.conversationId, turns.turnId
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+    return [
+        {
+            "conversationId": int(row["conversationId"]),
+            "turnId": int(row["turnId"]),
+            "userText": str(row["userText"]),
+            "aiText": str(row["aiText"]),
+            "conversationTitle": row["conversationTitle"],
+        }
+        for row in rows
+    ]
+
+
+def getAllTurnEmbeddings() -> list[dict]:
+    connection = getConnection()
+    try:
+        rows = connection.execute(
+            """
+            SELECT conversationId, turnId, embedding
+            FROM turnEmbeddings
+            ORDER BY conversationId, turnId
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+    return [
+        {
+            "conversationId": int(row["conversationId"]),
+            "turnId": int(row["turnId"]),
+            "embedding": bytes(row["embedding"]),
+        }
+        for row in rows
+    ]
+
+
 def getConceptMembership(conversationId: int) -> tuple[dict[int, set[int]], dict[int, str]]:
     """One conversation's current concept partition and its stable keys.
 
@@ -769,6 +850,7 @@ def createEdge(conversationId: int, fromTurnId: int, toTurnId: int, label: str, 
             """,
             (conversationId, fromTurnId, toTurnId, label, confidence),
         )
+        touchConversation(connection, conversationId)
         connection.commit()
         edgeId = int(cursor.lastrowid)
     finally:
@@ -800,6 +882,9 @@ def updateEdge(edgeId: int, label: str | None = None, confidence: float | None =
             fields.append("confidence = ?")
             values.append(confidence)
         values.append(edgeId)
+        row = connection.execute(
+            "SELECT conversationId FROM semanticEdges WHERE id = ?", (edgeId,)
+        ).fetchone()
         connection.execute(
             f"""
             UPDATE semanticEdges
@@ -808,6 +893,8 @@ def updateEdge(edgeId: int, label: str | None = None, confidence: float | None =
             """,
             values,
         )
+        if row is not None:
+            touchConversation(connection, int(row["conversationId"]))
         connection.commit()
     finally:
         connection.close()
@@ -818,6 +905,9 @@ def updateEdge(edgeId: int, label: str | None = None, confidence: float | None =
 def deleteEdge(edgeId: int) -> bool:
     connection = getConnection()
     try:
+        row = connection.execute(
+            "SELECT conversationId FROM semanticEdges WHERE id = ?", (edgeId,)
+        ).fetchone()
         cursor = connection.execute(
             """
             DELETE FROM semanticEdges
@@ -825,6 +915,8 @@ def deleteEdge(edgeId: int) -> bool:
             """,
             (edgeId,),
         )
+        if row is not None:
+            touchConversation(connection, int(row["conversationId"]))
         connection.commit()
         return cursor.rowcount > 0
     finally:
@@ -1064,4 +1156,3 @@ def listAllConceptLinks() -> list[dict]:
         connection.close()
 
     return [_conceptLinkRow(row) for row in rows]
-

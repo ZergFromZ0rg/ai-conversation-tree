@@ -1,10 +1,11 @@
 import json
+import re
 from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -34,6 +35,7 @@ from chatService import (
 from conceptIndex import relinkAllConceptLinks
 from db import getConversationTurnIds, initDb
 from graphService import analyzeImmediateRelationship
+from analysisService import buildConversationReport, buildConversationSummary, reportAsMarkdown, searchConversations
 
 EDGE_LABELS = ("continuation", "branch", "related")
 CONCEPT_LINK_KINDS = ("same", "related")
@@ -124,6 +126,9 @@ def root():
             "POST /conversations/{conversationId}/analyze",
             "GET /conversations/{conversationId}/graph",
             "GET /conversations/{conversationId}/concept-links",
+            "GET /conversations/{conversationId}/summary",
+            "GET /conversations/{conversationId}/report",
+            "GET /search",
             "GET /concepts/graph",
             "POST /concepts/relink",
             "POST /concept-links",
@@ -285,6 +290,45 @@ def getConversationConceptLinks(conversationId: int):
     if getConversationSession(conversationId) is None:
         raise HTTPException(status_code=404, detail="Conversation not found.")
     return listConversationConceptLinks(conversationId)
+
+
+@app.get("/conversations/{conversationId}/summary")
+def getConversationSummary(conversationId: int):
+    summary = buildConversationSummary(conversationId)
+    if summary is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return summary
+
+
+@app.get("/conversations/{conversationId}/report")
+def getConversationReport(conversationId: int, format: str = "markdown"):
+    if format not in ("markdown", "json"):
+        raise HTTPException(status_code=422, detail="format must be 'markdown' or 'json'.")
+    report = buildConversationReport(conversationId)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    title = report["conversation"]["title"] or f"conversation-{conversationId}"
+    safeTitle = re.sub(r"[^a-zA-Z0-9_-]+", "-", title).strip("-") or f"conversation-{conversationId}"
+    if format == "json":
+        return Response(
+            content=json.dumps(report, indent=2),
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{safeTitle}.json"'},
+        )
+    return PlainTextResponse(
+        reportAsMarkdown(report),
+        media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="{safeTitle}.md"'},
+    )
+
+
+@app.get("/search")
+def search(query: str, limit: int = 20):
+    if not query.strip():
+        raise HTTPException(status_code=422, detail="query must not be empty.")
+    if not 1 <= limit <= 100:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 100.")
+    return searchConversations(query, limit)
 
 
 @app.get("/concepts/graph")

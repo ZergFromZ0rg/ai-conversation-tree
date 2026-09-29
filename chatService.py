@@ -180,6 +180,40 @@ def generateOpenAiText(userText: str, model: str, apiKey: str | None = None) -> 
     return aiText
 
 
+def generateOpenAiTextStream(userText: str, model: str, apiKey: str | None = None):
+    """Yield text deltas from the OpenAI Responses SSE stream."""
+    apiKey = apiKey or os.environ.get("OPENAI_API_KEY")
+    if not apiKey:
+        raise RuntimeError("OPENAI_API_KEY is not set.")
+    with httpx.stream(
+        "POST",
+        "https://api.openai.com/v1/responses",
+        headers={
+            "Authorization": f"Bearer {apiKey}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        },
+        json={
+            "model": model,
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": userText}]}],
+            "stream": True,
+        },
+        timeout=60.0,
+    ) as response:
+        response.raise_for_status()
+        for line in response.iter_lines():
+            if not line or not line.startswith("data:"):
+                continue
+            payload = line[len("data:") :].strip()
+            if payload == "[DONE]":
+                break
+            event = json.loads(payload)
+            if event.get("type") == "response.output_text.delta" and event.get("delta"):
+                yield event["delta"]
+            if event.get("type") == "response.completed":
+                break
+
+
 anthropicApiVersion = "2023-06-01"
 
 
@@ -352,12 +386,9 @@ def generateAnthropicTextStream(userText: str, model: str, apiKey: str | None = 
 def streamAiText(userText: str, modelSpec: str | None = None, apiKey: str | None = None):
     """Yield a reply as it's generated. Same provider routing as generateAiText.
 
-    OpenAI's Responses API streaming protocol and Gemini's `streamGenerateContent`
-    (a JSON array, not line-delimited) aren't implemented (nothing here can
-    exercise either without a live key, and Gemini's shape isn't a simple
-    line-by-line parse) — those paths fall back to the blocking call and yield
-    the whole reply as one chunk, so the streaming endpoint still works end to
-    end for them, just without token-by-token output.
+    Gemini's `streamGenerateContent` (a JSON array, not line-delimited) still
+    falls back to the blocking call; OpenAI and Ollama use their native SSE or
+    NDJSON streams.
     """
     provider, model = parseModelSpec(modelSpec or envDefaultModelSpec())
 
@@ -370,7 +401,9 @@ def streamAiText(userText: str, modelSpec: str | None = None, apiKey: str | None
         yield from generateOllamaTextStream(userText, model)
         return
     if provider == "openai":
-        yield generateOpenAiText(userText, model or os.environ.get("OPENAI_MODEL", "gpt-5-mini"), apiKey)
+        yield from generateOpenAiTextStream(
+            userText, model or os.environ.get("OPENAI_MODEL", "gpt-5-mini"), apiKey
+        )
         return
     if provider == "anthropic":
         if not model:

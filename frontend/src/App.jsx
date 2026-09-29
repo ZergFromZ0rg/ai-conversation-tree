@@ -8,6 +8,7 @@ import { GraphRail } from "./components/GraphRail";
 import { GraphDrawer } from "./components/GraphDrawer";
 import { WorkspaceMap } from "./components/WorkspaceMap";
 import { SettingsModal } from "./components/SettingsModal";
+import { AnalysisPanel } from "./components/AnalysisPanel";
 
 const DRAWER_STORAGE_KEY = "act.drawerOpen";
 const SIDEBAR_STORAGE_KEY = "act.sidebarOpen";
@@ -81,6 +82,7 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(readSidebarPreference);
   const [mapOpen, setMapOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [analysisMode, setAnalysisMode] = useState(null);
   const [apiKeys, setApiKeys] = useState(readApiKeys);
   const [models, setModels] = useState([]);
   const [selectedModel, setSelectedModel] = useState(readModelPreference);
@@ -256,6 +258,10 @@ export function App() {
     [sendTurn, loadConversations, selectedModel, selectedModelApiKey],
   );
 
+  const exportReport = useCallback(async (format) => {
+    if (conversationId) await api.downloadReport(conversationId, format);
+  }, [conversationId]);
+
   const activeConversation = conversations.find((conversation) => conversation.id === conversationId);
   const composerDisabled = !conversationId || status === "sending";
   const selectedConceptIds =
@@ -302,6 +308,9 @@ export function App() {
           >
             Map
           </button>
+          <button type="button" className="ghostButton" onClick={() => setAnalysisMode("search")}>Search</button>
+          <button type="button" className="ghostButton" onClick={() => setAnalysisMode("summary")} disabled={!conversationId}>Summary</button>
+          <button type="button" className="ghostButton" onClick={() => void exportReport("markdown")} disabled={!conversationId}>Export</button>
           <button
             type="button"
             className="iconButton"
@@ -370,6 +379,15 @@ export function App() {
           onSave={saveApiKeys}
           onClose={() => setSettingsOpen(false)}
           onModelsChanged={refreshModels}
+        />
+      ) : null}
+
+      {analysisMode ? (
+        <AnalysisPanel
+          mode={analysisMode}
+          conversationId={conversationId}
+          onClose={() => setAnalysisMode(null)}
+          onOpenConversation={selectConversation}
         />
       ) : null}
     </div>
