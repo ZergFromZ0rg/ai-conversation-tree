@@ -1,11 +1,44 @@
+const TOKEN_STORAGE_KEY = "act.apiToken";
+
+// Hosted deployments gate the API behind a shared token (see README,
+// "Hosted deployment"). Local installs leave it unset and nothing changes.
+export function getApiToken() {
+  try {
+    return window.localStorage.getItem(TOKEN_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+export function setApiToken(token) {
+  try {
+    if (token) window.localStorage.setItem(TOKEN_STORAGE_KEY, token);
+    else window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+  } catch {
+    /* storage unavailable — ignore */
+  }
+}
+
+function authHeaders() {
+  const token = getApiToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+function failIfNotOk(response) {
+  if (response.ok) return;
+  if (response.status === 401) {
+    // Lets the app open Settings on the token field.
+    window.dispatchEvent(new Event("act:unauthorized"));
+  }
+  throw new Error(`Request failed: ${response.status}`);
+}
+
 async function apiRequest(path, init) {
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    headers: { "Content-Type": "application/json", ...authHeaders(), ...(init?.headers ?? {}) },
     ...init,
   });
-  if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
-  }
+  failIfNotOk(response);
   if (response.status === 204) {
     return null;
   }
@@ -35,11 +68,23 @@ export const api = {
     apiRequest(`/conversations/${conversationId}/concept-links`),
   getConceptGraph: () => apiRequest("/concepts/graph"),
   getSummary: (conversationId) => apiRequest(`/conversations/${conversationId}/summary`),
-  searchConversations: (query, limit = 20) =>
-    apiRequest(`/search?query=${encodeURIComponent(query)}&limit=${limit}`),
+  getLlmSummary: (conversationId, model, apiKey) =>
+    apiRequest(`/conversations/${conversationId}/summary/llm`, {
+      method: "POST",
+      body: JSON.stringify({ model: model ?? null, apiKey: apiKey ?? null }),
+    }),
+  getContextHealth: (conversationId) =>
+    apiRequest(`/conversations/${conversationId}/context-health`),
+  searchConversations: (query, limit = 30, conversationId = null) =>
+    apiRequest(
+      `/search?query=${encodeURIComponent(query)}&limit=${limit}` +
+        (conversationId ? `&conversationId=${conversationId}` : ""),
+    ),
   downloadReport: async (conversationId, format) => {
-    const response = await fetch(`/conversations/${conversationId}/report?format=${format}`);
-    if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+    const response = await fetch(`/conversations/${conversationId}/report?format=${format}`, {
+      headers: authHeaders(),
+    });
+    failIfNotOk(response);
     const blob = await response.blob();
     const disposition = response.headers.get("Content-Disposition") || "";
     const filename = disposition.match(/filename="?([^";]+)"?/)?.[1] || `conversation-${conversationId}.${format === "json" ? "json" : "md"}`;
@@ -84,10 +129,11 @@ export const api = {
 async function* streamEvents(path, body) {
   const response = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(body),
   });
-  if (!response.ok || !response.body) {
+  failIfNotOk(response);
+  if (!response.body) {
     throw new Error(`Request failed: ${response.status}`);
   }
 

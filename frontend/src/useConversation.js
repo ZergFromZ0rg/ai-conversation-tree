@@ -3,6 +3,7 @@ import { api } from "./api";
 
 const emptyGraph = { nodes: [], edges: [] };
 const emptyConceptLinks = { concepts: [] };
+const noContextHealth = { flaggedTurns: [], horizonTurnId: null };
 
 /**
  * Owns one conversation's turns + graph and the actions that mutate them.
@@ -14,6 +15,7 @@ export function useConversation(conversationId) {
   const [turns, setTurns] = useState([]);
   const [graph, setGraph] = useState(emptyGraph);
   const [conceptLinks, setConceptLinks] = useState(emptyConceptLinks);
+  const [contextHealth, setContextHealth] = useState(noContextHealth);
   const [status, setStatus] = useState("idle");
   const [pendingUserText, setPendingUserText] = useState(null);
   const [streamingText, setStreamingText] = useState("");
@@ -23,19 +25,22 @@ export function useConversation(conversationId) {
       setTurns([]);
       setGraph(emptyGraph);
       setConceptLinks(emptyConceptLinks);
+      setContextHealth(noContextHealth);
       setStatus("idle");
       return;
     }
     setStatus("loading");
     try {
-      const [turnsPayload, graphPayload, conceptLinksPayload] = await Promise.all([
+      const [turnsPayload, graphPayload, conceptLinksPayload, healthPayload] = await Promise.all([
         api.getTurns(conversationId),
         api.getGraph(conversationId),
         api.getConceptLinks(conversationId).catch(() => emptyConceptLinks),
+        api.getContextHealth(conversationId).catch(() => noContextHealth),
       ]);
       setTurns(turnsPayload.turns);
       setGraph({ nodes: graphPayload.nodes, edges: graphPayload.edges });
       setConceptLinks({ concepts: conceptLinksPayload.concepts ?? [] });
+      setContextHealth(healthPayload);
       setStatus("idle");
     } catch {
       setStatus("error");
@@ -95,6 +100,7 @@ export function useConversation(conversationId) {
     turns,
     graph,
     conceptLinks,
+    contextHealth,
     status,
     pendingUserText,
     streamingText,

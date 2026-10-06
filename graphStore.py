@@ -67,7 +67,14 @@ def lockedGraph(conversationId: int):
             _storeGraph(conversationId, version or "", graph)
         else:
             graph = entry[1]
-        yield graph
+        try:
+            yield graph
+        except BaseException:
+            # The caller may have mutated the in-memory graph before failing
+            # (e.g. addTurn succeeded, persisting didn't). The database is the
+            # truth, so drop the cached copy rather than keep a phantom turn.
+            invalidate(conversationId)
+            raise
 
 
 def invalidate(conversationId: int) -> None:

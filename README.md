@@ -1,20 +1,79 @@
 # AI Conversation Tree
 
-`AI Conversation Tree` is a local-first proof of concept for analyzing chat structure.
+`AI Conversation Tree` turns chat transcripts into a map you can search and
+audit. It decides how each turn relates to the ones before it (continuation,
+branch, related, or a fresh topic), links concepts that recur across your
+conversations, and warns when a long chat has probably lost its own context.
 
-It takes a sequence of user/assistant turns, classifies how each new turn relates to earlier turns, stores the result, and renders the conversation both as a normal chat and as a graph.
+Chats get in two ways: type into the built-in viewer (local models, OpenAI,
+Anthropic, Gemini, or a stub), or **capture the conversations you already have
+in ChatGPT, Claude, and Gemini with the browser extension**.
 
-Current goals:
+It runs on your machine by default (SQLite, local embedding models, no
+accounts). It is a technically solid, explainable portfolio project, not a
+hosted product — though a Docker setup is included if you want one.
 
-- validate graph logic
-- persist conversations locally
-- test with local models through `Ollama`, switchable per conversation
-- link concepts across separate conversations
-- provide a chat-first viewer with a graph drawer for inspection
+![The conversation graph drawer: a seven-turn imported ChatGPT chat with its turns linked by continuation and related edges, a context-loss warning in the transcript, and an "also discussed elsewhere" panel pointing at a Gemini chat.](docs/images/conversation-graph.png)
 
-This is not intended to be production-ready. It is intended to be technically solid, explainable, and useful as a portfolio project.
+## Five-Minute Demo
 
-![The conversation graph drawer: a six-turn chat split into two threads, its turns linked by continuation and branch edges, with an "also discussed elsewhere" panel below.](docs/images/conversation-graph.png)
+This walks through everything with no API key and no browser extension. It
+loads four chats from three sources the same way the extension would.
+
+```bash
+# 1. backend + viewer (see Local Setup for the one-time install)
+AI_CONVERSATION_TREE_STUB_LLM=1 AI_CONVERSATION_TREE_CONTEXT_TOKENS=400 \
+  venv/bin/python -m uvicorn api:app
+
+# 2. in another terminal: load the demo workspace through the ingest API
+venv/bin/python scripts/seed_demo.py
+```
+
+Open <http://127.0.0.1:8000/ui>, then:
+
+1. **Read a chat with a graph.** Pick *Planning a Postgres migration* (ChatGPT
+   badge). Press `Cmd/Ctrl+G` to open the graph: a seven-turn chat that
+   splits into threads, each edge labelled and scored.
+2. **See context-loss detection.** In the transcript, turn 5 ("*As I said*, we
+   cannot have any downtime…") and turn 6 (a question asked verbatim in turn 3)
+   carry an amber warning, and a dashed line marks where earlier messages fall
+   outside the model's context window. (The demo shrinks the window to 400
+   tokens so a short chat crosses it; the default is 8,000.)
+3. **Search across every chat.** Press `Cmd/Ctrl+K`, type `index concurrently`.
+   Hits from a Gemini chat and the ChatGPT chat appear together, grouped by
+   conversation, with matched words highlighted. `Enter` jumps straight to that
+   turn.
+4. **Follow a cross-chat link.** The graph drawer's *Also discussed elsewhere*
+   panel shows the Gemini indexing chat. Open `Map` for the whole workspace:
+   the two Postgres chats are linked, and so are the two decorator chats.
+5. **Summarise.** `Summary` shows the local summary and the context-health
+   report; with a real model selected, *Write with the selected model*
+   replaces the summary with a model-written one.
+
+![Search across chats: results grouped by conversation with source badges, question/answer tags, turn positions, and highlighted matches.](docs/images/search.png)
+
+![Summary and context health: the structured summary, an "At risk" verdict, token pressure against the context window, and the flagged turns, each one click from the transcript.](docs/images/context-health.png)
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph sources[Where chats come from]
+        EXT["Browser extension<br/>ChatGPT · Claude · Gemini"]
+        UI["Built-in chat viewer"]
+    end
+    EXT -- "POST /ingest/conversations" --> API
+    UI -- "turns / stream" --> API
+    API["FastAPI"] --> CLS["Classifier<br/>embeddings + discourse + cross-encoder"]
+    CLS --> DB[("SQLite<br/>turns · edges · concepts · embeddings")]
+    DB --> CON["Concept linker<br/>cross-conversation"]
+    DB --> SRCH["Hybrid search"]
+    DB --> CTX["Context-health analysis"]
+    API --> VIEW["Viewer: chat · graph · map · search"]
+    CON --> VIEW
+    SRCH --> VIEW
+    CTX --> VIEW
+```
 
 ## What It Does
 
@@ -202,12 +261,24 @@ Backend:
   - optional PostgreSQL/pgvector HNSW index for scalable turn retrieval, with
     automatic fallback to local NumPy search
 - `analysisService.py`
-  - conversation summaries, cross-chat semantic search, and Markdown/JSON
-    report generation
+  - structured and LLM-written summaries, hybrid cross-chat search, and
+    Markdown/JSON report generation
+- `ingestService.py`
+  - turns captured role-tagged messages into turns, matches a chat to an
+    earlier import, and classifies only what is new
+- `contextService.py`
+  - context-loss detection (pure scoring function plus a DB wrapper)
 - `db.py`
   - `SQLite` schema and helpers
 - `models.py`
-  - application data models
+  - the `TurnModel` dataclass
+
+Elsewhere:
+
+- `extension/` — the Manifest V3 browser extension and its tests
+- `tests/` — the pytest suite
+- `scripts/seed_demo.py` — loads the demo workspace through the ingest API
+- `Dockerfile`, `docker-compose.yml` — hosted deployment
 
 Frontend (`frontend/src/`):
 
@@ -231,7 +302,10 @@ as a legacy sample database.
 
 - `conversations` — `model` column holds the conversation's default response
   model (`stub`, `ollama:<name>`, or `openai:<name>`); null means use the
-  environment default
+  environment default. Imported chats also carry `source` (`chatgpt` /
+  `claude` / `gemini`), `externalId` (the site's own conversation id), and
+  `sourceUrl`; `(source, externalId)` is unique, which is how a re-sync finds
+  its conversation
 - `turns`
 - `semanticEdges` — each edge carries an `origin` of `auto` (classifier) or `manual` (hand-created via `POST /edges`)
 - `turnConcepts` — `conceptKey` is a stable per-concept identity carried across
@@ -290,12 +364,30 @@ stale graph state.
   `delta`
 - `GET /conversations/{conversationId}/turns`
 
+### Ingest Endpoint
+
+- `POST /ingest/conversations` — create or update a conversation captured
+  elsewhere. Body: `{"source": "chatgpt"|"claude"|"gemini"|"other",
+  "externalId": "...", "title"?, "url"?, "messages": [{"role": "user"|"assistant",
+  "text": "..."}]}`. See "Browser Extension" for the exact semantics. Returns
+  `{conversationId, created, addedTurns, rebuilt, turnCount}`; `422` if no
+  complete user/assistant exchange is present
+
 ### Analysis Endpoints
 
 - `GET /conversations/{conversationId}/summary` — deterministic local summary
   with turn count, thread count, relationship count, and topic terms
-- `GET /search?query=...&limit=20` — semantic search across all conversations;
-  uses pgvector/HNSW by default and falls back to local NumPy search
+- `POST /conversations/{conversationId}/summary/llm` — the same summary with
+  its prose written by a model (`{"model"?, "apiKey"?}`; defaults to the
+  conversation's model). Falls back to the local summary, with a
+  `fallbackReason`, on the stub model or a provider error. Cached per
+  conversation state and model
+- `GET /conversations/{conversationId}/context-health` — context-loss report
+  (see "Context-Loss Detection")
+- `GET /search?query=...&limit=20&conversationId=` — hybrid search across all
+  conversations (or one). Each hit carries `snippet`, `matchedTerms`,
+  `matchIn` (`question` | `answer`), `turnId`, `turnCount`, `source`, and
+  `score`
 - `GET /conversations/{conversationId}/report?format=markdown|json` — download
   an analysis report containing the summary, topics, turns, and semantic edges
 
@@ -406,7 +498,7 @@ Semantics:
 The viewer at `/ui` is a normal chat: a conversation list on the left, the
 transcript in the middle, a composer at the bottom.
 
-![The chat viewer: conversation list on the left, transcript in the middle, model picker and composer at the bottom.](docs/images/chat-view.png)
+![The chat viewer: conversation list with source badges on the left, an imported chat in the middle with its context-window horizon and a context-loss warning, model picker and composer at the bottom.](docs/images/chat-view.png)
 
 The composer has a model picker populated from `GET /models`. Choosing a model
 sends it with each turn and stores it as the conversation's default; a new chat
@@ -441,8 +533,10 @@ Clicking a concept switches to that conversation.
 
 The chat header also provides:
 
-- `Search` — semantic search across all stored conversations
-- `Summary` — a local summary of the active conversation and its detected topics
+- `Search` (`Cmd/Ctrl+K`) — hybrid search across all stored conversations;
+  `Enter` jumps to the matching turn
+- `Summary` — the active conversation's summary (local, or written by the
+  selected model) plus its context-health report
 - `Export` — downloads a Markdown analysis report; JSON reports are available
   through the report API
 
@@ -472,6 +566,128 @@ full reply is in — the graph, concept links, and title update right after the
 stream ends, same as the blocking path.
 
 The UI follows the browser's light/dark preference.
+
+## Browser Extension
+
+`extension/` is a Manifest V3 extension (Chrome and other Chromium browsers)
+that captures the conversation open in a ChatGPT, Claude, or Gemini tab and
+sends it to your server.
+
+**Install**
+
+1. Open `chrome://extensions`, enable *Developer mode*, choose *Load unpacked*,
+   and select the `extension/` folder.
+2. Open a saved conversation on `chatgpt.com`, `claude.ai`, or
+   `gemini.google.com`, click the extension icon, and press *Send this chat to
+   the tree*. The popup reports how many turns were added and links to the
+   conversation in the viewer.
+3. The popup's *Settings* hold the server URL (default
+   `http://127.0.0.1:8000`) and an API token if the server requires one.
+   Pointing it at a non-local server asks Chrome for permission to reach that
+   origin. *Sync automatically after each reply* is off by default; when on,
+   the extension syncs once the page has been quiet for five seconds and no
+   reply is streaming.
+
+**What gets sent.** Only the messages of the tab you act on (or, with auto-sync
+on, of supported chat pages), only to the server URL you configured. Nothing is
+sent until you click the button or enable auto-sync.
+
+**Ingestion semantics** (`ingestService.py`)
+
+- Messages are paired into turns: consecutive user messages merge into one
+  prompt, consecutive assistant messages into one reply. A leading assistant
+  greeting and a trailing prompt with no reply yet are dropped — the next sync
+  picks up the finished turn.
+- A chat is identified by `(source, externalId)`. Re-syncing a chat that grew
+  appends only the new turns, so the cost is proportional to what changed. A
+  chat that is unchanged is a no-op.
+- If the stored history *disagrees* with what arrives (an edited prompt, a
+  regenerated answer), the conversation is rebuilt from the incoming history
+  rather than guessing which turns survive; the response says `rebuilt: true`.
+- Imported turns go through the same classifier, concept assignment, and
+  cross-chat linking as typed ones, so they show up in the graph, the map,
+  search, and context-health immediately. Classifying on CPU takes roughly a
+  second or two per turn.
+
+**Fragile by nature.** The extractors read each site's DOM, and those sites
+change their markup without notice. The selectors live in one table at the top
+of `extension/src/extract.js` (several fallbacks per role). The extractor is
+unit-tested against fixture HTML for all three sites, but **the fixtures are
+hand-written approximations of each site's structure, not captures of the live
+pages** — if a site ships a redesign the popup says "layout may have changed"
+and that table is the one place to update.
+
+```bash
+cd extension && npm install && npm test   # extractor tests (jsdom)
+```
+
+## Search
+
+`GET /search` (`Cmd/Ctrl+K` in the viewer) is hybrid: embedding cosine finds
+turns that mean the same thing in different words; a lexical pass rewards turns
+containing the query's own words, so exact phrases and identifiers are found
+too. Question hits get a small boost over answer hits.
+
+The viewer groups hits by conversation (with the source badge), labels each as
+a question or answer match with its position ("turn 3 of 7"), shows a snippet
+around the match with the words highlighted, and can scope to the current chat.
+`↑`/`↓` move through results, `Enter` opens the conversation and scrolls to the
+exact turn.
+
+## Context-Loss Detection
+
+Long chats fail quietly: the model stops seeing something said fifty turns ago.
+`contextService.py` looks for the tells in the conversation's own structure —
+deterministic, no model call:
+
+| Signal | Fires when | Weight |
+| --- | --- | --- |
+| `reask` | the user repeats an earlier question (embedding cosine ≥ 0.80, ≥ 0.90 for the immediately preceding turn) | 0.50 |
+| `memoryCue` | the user points back: "as I said", "you forgot", "remember that…", "go back to…" | 0.45 |
+| `farReach` | a turn is semantically tied to one ≥ 4 turns back **and** the text between them exceeds the context window | 0.60 |
+| `longRange` | same, but still inside the window | 0.25 |
+
+A turn's score combines its signals as `1 − Π(1 − w)`; ≥ 0.60 is `high`, ≥ 0.35
+`medium`. The conversation gets an overall verdict, a token estimate
+(characters ÷ 4) against the assumed window, and a *horizon*: the earliest turn
+that still fits in the window counting back from the newest one. The transcript
+draws a dashed line there and an amber note under each flagged turn; the
+Summary panel lists them, each one click from the turn.
+
+The window defaults to 8,000 tokens and is set with
+`AI_CONVERSATION_TREE_CONTEXT_TOKENS`. It is an assumption about how much a
+model attends to well, not a measurement of any particular model, and these
+signals indicate *risk*, not proof — a repeated question can be deliberate.
+
+## Hosted Deployment
+
+For an always-on server (so the extension can sync from any machine):
+
+```bash
+export AI_CONVERSATION_TREE_API_TOKEN=$(openssl rand -hex 24)
+docker compose up -d --build
+```
+
+- The image bakes in both models, so the container starts offline, and keeps
+  the SQLite database on the `act-data` volume (`/data`).
+- With `AI_CONVERSATION_TREE_API_TOKEN` set, every API route requires
+  `Authorization: Bearer <token>` — including `/ingest/conversations`. The
+  viewer shell (`/ui`, `/assets`), `/healthz`, and `/` stay public so the page
+  can load; the viewer asks for the token in *Settings* after its first `401`.
+  The extension has a matching field. Compose refuses to start without a token.
+- **Put TLS in front** (Caddy, nginx, a cloud load balancer). The token is a
+  header; it must not cross the network in clear text.
+- `AI_CONVERSATION_TREE_CORS_ORIGINS` adds browser origins (comma-separated)
+  for a viewer served from a different domain; extension origins are always
+  allowed.
+- Reply generation: stub by default; set `OPENAI_API_KEY` for OpenAI. Provider
+  keys entered in the viewer's Settings stay in that browser and are forwarded
+  per request, as locally.
+- `GET /healthz` backs the container's health check.
+
+This is a single shared token on a single-user store: there are no accounts,
+no per-user data isolation, and no rate limiting. The Dockerfile and compose
+file are meant for one person's private server, not a multi-tenant service.
 
 ## Local Setup
 
@@ -564,7 +780,8 @@ npm run dev   # http://127.0.0.1:5173, proxies /conversations /edges /models /co
 
 Typical workflow:
 
-1. start a new chat
+1. start a new chat — or capture existing ChatGPT / Claude / Gemini chats with
+   the browser extension
 2. send turns through the UI or API
 3. open the graph drawer to see how the turns relate
 4. hit `Reanalyze` after changing classifier logic
@@ -611,6 +828,26 @@ curl -N -X POST http://127.0.0.1:8000/conversations/1/turns/stream \
 `-N` disables curl's output buffering so the `delta` events print as they
 arrive instead of all at once at the end.
 
+### Import a captured chat (what the extension sends)
+
+```bash
+curl -X POST http://127.0.0.1:8000/ingest/conversations \
+  -H "Content-Type: application/json" \
+  -d '{"source":"chatgpt","externalId":"abc123","title":"Cats",
+       "messages":[{"role":"user","text":"What are cats?"},
+                   {"role":"assistant","text":"Small carnivorous mammals."}]}'
+```
+
+Send it again with more messages and only the new turns are added. Add
+`-H "Authorization: Bearer $TOKEN"` against a server that has a token set.
+
+### Search, and check a chat's context health
+
+```bash
+curl "http://127.0.0.1:8000/search?query=index%20concurrently"
+curl http://127.0.0.1:8000/conversations/1/context-health
+```
+
 ### Get the graph
 
 ```bash
@@ -632,16 +869,27 @@ curl -X POST http://127.0.0.1:8000/conversations/1/analyze
 
 ## Verification
 
-Backend syntax:
+Automated tests (pytest; no network, models load from the local Hugging Face
+cache):
 
 ```bash
-venv/bin/python -m py_compile api.py chatService.py graphService.py conceptIndex.py graphStore.py db.py models.py
+venv/bin/pip install -r requirements-dev.txt
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 venv/bin/python -m pytest
 ```
 
-Persistence milestone:
+The suite covers ingestion (pairing, idempotent re-sync, append, rebuild,
+validation), context-health scoring, hybrid search, summaries (including
+provider failure), API-token auth and CORS (a 401 still carries CORS headers), and the conversation / turn / edge /
+report / concept-link endpoints, plus regressions for atomic turn writes, cache
+recovery after a failed write, concurrent first syncs, and stale pgvector rows.
+Each test runs against a throwaway database.
+The classifier is graded separately by the eval scripts below, and the extension
+extractors by `npm test` in `extension/`.
+
+Lint (unused imports / names):
 
 ```bash
-HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 venv/bin/python testSqliteMilestone.py
+venv/bin/pip install pyflakes && venv/bin/python -m pyflakes *.py scripts tests
 ```
 
 Evaluation scripts:
@@ -684,44 +932,43 @@ cd frontend && npm run build
   `updatedAt` version; SQLite still remains the write coordination point
 - Gemini replies currently fall back to one chunk; its streaming JSON protocol
   is not yet implemented
-- no auth, multi-user isolation, or production deployment concerns are addressed
+- auth is one shared token: no accounts, per-user isolation, or rate limiting
+- the extension's DOM selectors need maintenance as the chat sites change, and
+  they have been verified against fixture HTML, not the live sites
+- context-loss detection is heuristic (it flags risk from repeated questions,
+  "as I said" callbacks, and long-range dependencies); it does not read
+  anything the model actually saw
+- ingestion classifies on the request thread, so a very long first sync can
+  take a minute or more
 
 ## Future Work
 
 ### Conversation Intelligence
 
-Implemented:
-
-- conversation summaries with thread, edge, and topic counts
-- semantic search across all conversations
-- Markdown and JSON analysis report exports
+Implemented: structured and model-written summaries, hybrid search with
+turn-level navigation, Markdown/JSON report exports, and context-loss
+detection.
 
 Next:
 
-- context-loss detection when an assistant response appears to ignore or
-  contradict the active conversation thread
+- contextual signals the structure can't see: an assistant reply that
+  contradicts an earlier answer (needs a model or NLI pass)
+- summaries that cover each thread rather than the whole chat
+- search filters by source and date
 
 ### Browser Extension
 
-The most interesting product direction is a browser extension rather than a standalone app.
+Implemented: capture for ChatGPT, Claude, and Gemini, idempotent incremental
+sync, optional auto-sync, token auth.
 
-Goal:
+Next:
 
-- let users keep using `ChatGPT`, `Claude`, or `Gemini`
-- read the visible conversation from the page
-- build the conversation graph locally
-- render the graph as a side panel
-
-Planned work:
-
-- browser extension scaffold
-- content scripts for site-specific DOM extraction
-- per-site adapters for `ChatGPT`, `Claude`, and `Gemini`
-- local storage of extracted conversations
-- graph viewer injected as a side drawer
-- surface conversation summaries, context-loss warnings, and cross-chat search
-  from the side panel
-- optional connection to the current local backend for graph construction
+- inject the graph as a side panel on the chat site itself, instead of the
+  separate viewer tab
+- Firefox build (the manifest is close; the service worker needs a background
+  script shim)
+- background (queued) ingestion so long first syncs return immediately
+- live-site selector verification in CI
 
 ### Postgres + pgvector
 

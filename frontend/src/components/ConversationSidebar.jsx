@@ -1,5 +1,7 @@
 import { useState } from "react";
 
+const SOURCE_LABELS = { chatgpt: "ChatGPT", claude: "Claude", gemini: "Gemini" };
+
 function ConversationRow({ conversation, isActive, onSelect, onDelete }) {
   const [confirming, setConfirming] = useState(false);
   const title = conversation.title || `Conversation ${conversation.id}`;
@@ -8,6 +10,11 @@ function ConversationRow({ conversation, isActive, onSelect, onDelete }) {
     <div className={`conversationRow${isActive ? " conversationRowActive" : ""}`}>
       <button type="button" className="conversationRowSelect" onClick={() => onSelect(conversation.id)}>
         <span className="conversationRowTitle">{title}</span>
+        {conversation.source ? (
+          <span className="sourceBadge" title={`Imported from ${SOURCE_LABELS[conversation.source] ?? conversation.source}`}>
+            {SOURCE_LABELS[conversation.source] ?? conversation.source}
+          </span>
+        ) : null}
       </button>
       {confirming ? (
         <span className="conversationRowConfirm">

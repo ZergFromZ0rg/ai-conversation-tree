@@ -20,7 +20,12 @@ export default defineConfig({
       "/conversations": "http://127.0.0.1:8000",
       "/edges": "http://127.0.0.1:8000",
       "/models": "http://127.0.0.1:8000",
-      "/concepts": "http://127.0.0.1:8000"
+      "/concepts": "http://127.0.0.1:8000",
+      "/concept-links": "http://127.0.0.1:8000",
+      "/search": "http://127.0.0.1:8000",
+      "/ingest": "http://127.0.0.1:8000",
+      "/ollama": "http://127.0.0.1:8000",
+      "/healthz": "http://127.0.0.1:8000"
     }
   }
 });

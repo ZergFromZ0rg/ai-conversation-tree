@@ -1,9 +1,11 @@
+import hmac
 import json
+import os
 import re
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException, Response, status
+from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -35,7 +37,15 @@ from chatService import (
 from conceptIndex import relinkAllConceptLinks
 from db import getConversationTurnIds, initDb
 from graphService import analyzeImmediateRelationship
-from analysisService import buildConversationReport, buildConversationSummary, reportAsMarkdown, searchConversations
+from analysisService import (
+    buildConversationReport,
+    buildConversationSummary,
+    buildLlmSummary,
+    reportAsMarkdown,
+    searchConversations,
+)
+from contextService import buildContextHealth
+from ingestService import SOURCES, ingestConversation
 
 EDGE_LABELS = ("continuation", "branch", "related")
 CONCEPT_LINK_KINDS = ("same", "related")
@@ -45,12 +55,46 @@ app = FastAPI()
 initDb()
 frontendDistDir = Path(__file__).parent / "frontend" / "dist"
 
+# Hosted deployments set a shared token; every API route then requires it
+# (`Authorization: Bearer <token>`). The static viewer shell, /healthz and the
+# index stay public so the page can load and ask for the token. Unset (the
+# local default) means no auth.
+_publicPaths = ("/", "/ui", "/healthz")
+
+
+@app.middleware("http")
+async def requireApiToken(request: Request, call_next):
+    token = os.environ.get("AI_CONVERSATION_TREE_API_TOKEN", "")
+    path = request.url.path
+    if (
+        not token
+        or request.method == "OPTIONS"
+        or path in _publicPaths
+        or path.startswith("/assets/")
+    ):
+        return await call_next(request)
+    header = request.headers.get("authorization", "")
+    supplied = header[7:] if header.lower().startswith("bearer ") else ""
+    if not hmac.compare_digest(supplied.encode(), token.encode()):
+        return JSONResponse({"detail": "Missing or invalid API token."}, status_code=401)
+    return await call_next(request)
+
+
+# Added after the token middleware, so it is the outermost layer: even a 401
+# carries CORS headers and the viewer can read it.
+# Extra browser origins (a hosted frontend on another domain) come from a
+# comma-separated env var. Extension pages are always allowed: they can only
+# reach the API at all when the user has configured this server's URL, and with
+# AI_CONVERSATION_TREE_API_TOKEN set they still need the token.
+extraOrigins = [
+    origin.strip()
+    for origin in os.environ.get("AI_CONVERSATION_TREE_CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://127.0.0.1:5173",
-        "http://localhost:5173",
-    ],
+    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173", *extraOrigins],
+    allow_origin_regex=r"^(chrome|moz|safari-web)-extension://.+$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -60,6 +104,19 @@ frontendAssetsDir = frontendDistDir / "assets"
 if frontendAssetsDir.is_dir():
     # The built index.html references assets with absolute /assets/... URLs.
     app.mount("/assets", StaticFiles(directory=frontendAssetsDir), name="assets")
+
+
+MODEL_SPEC_HINT = "model must be 'stub', 'ollama:<name>', 'openai:<name>', 'anthropic:<name>', or 'gemini:<name>'."
+
+
+def requireConversation(conversationId: int) -> None:
+    if getConversationSession(conversationId) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+
+
+def requireValidModel(model: str | None) -> None:
+    if model is not None and not isValidModelSpec(model):
+        raise HTTPException(status_code=422, detail=MODEL_SPEC_HINT)
 
 
 class CreateConversationRequest(BaseModel):
@@ -102,6 +159,24 @@ class CreateConceptLinkRequest(BaseModel):
     kind: str = "related"
 
 
+class CapturedMessage(BaseModel):
+    role: str = Field(min_length=1, max_length=20)
+    text: str = Field(max_length=200_000)
+
+
+class IngestConversationRequest(BaseModel):
+    source: str
+    externalId: str = Field(min_length=1, max_length=200)
+    title: str | None = Field(default=None, max_length=500)
+    url: str | None = Field(default=None, max_length=2000)
+    messages: list[CapturedMessage] = Field(max_length=4000)
+
+
+class LlmSummaryRequest(BaseModel):
+    model: str | None = None
+    apiKey: str | None = None
+
+
 class PullOllamaModelRequest(BaseModel):
     model: str = Field(min_length=1)
 
@@ -128,6 +203,10 @@ def root():
             "GET /conversations/{conversationId}/concept-links",
             "GET /conversations/{conversationId}/summary",
             "GET /conversations/{conversationId}/report",
+            "GET /conversations/{conversationId}/context-health",
+            "POST /conversations/{conversationId}/summary/llm",
+            "POST /ingest/conversations",
+            "GET /healthz",
             "GET /search",
             "GET /concepts/graph",
             "POST /concepts/relink",
@@ -139,6 +218,11 @@ def root():
             "POST /debug/immediate",
         ],
     }
+
+
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}
 
 
 @app.get("/ui")
@@ -183,11 +267,7 @@ def pullOllama(req: PullOllamaModelRequest):
 
 @app.post("/conversations", status_code=status.HTTP_201_CREATED)
 def createConversation(req: CreateConversationRequest):
-    if req.model is not None and not isValidModelSpec(req.model):
-        raise HTTPException(
-            status_code=422,
-            detail="model must be 'stub', 'ollama:<name>', 'openai:<name>', 'anthropic:<name>', or 'gemini:<name>'.",
-        )
+    requireValidModel(req.model)
     return createConversationSession(req.title, req.model)
 
 
@@ -206,11 +286,7 @@ def getConversation(conversationId: int):
 
 @app.patch("/conversations/{conversationId}")
 def updateConversation(conversationId: int, req: UpdateConversationRequest):
-    if req.model is not None and not isValidModelSpec(req.model):
-        raise HTTPException(
-            status_code=422,
-            detail="model must be 'stub', 'ollama:<name>', 'openai:<name>', 'anthropic:<name>', or 'gemini:<name>'.",
-        )
+    requireValidModel(req.model)
     conversation = setConversationSessionModel(conversationId, req.model)
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found.")
@@ -227,13 +303,8 @@ def deleteConversation(conversationId: int):
 
 @app.post("/conversations/{conversationId}/turns", status_code=status.HTTP_201_CREATED)
 def createTurn(conversationId: int, req: CreateTurnRequest):
-    if getConversationSession(conversationId) is None:
-        raise HTTPException(status_code=404, detail="Conversation not found.")
-    if req.model is not None and not isValidModelSpec(req.model):
-        raise HTTPException(
-            status_code=422,
-            detail="model must be 'stub', 'ollama:<name>', 'openai:<name>', 'anthropic:<name>', or 'gemini:<name>'.",
-        )
+    requireConversation(conversationId)
+    requireValidModel(req.model)
     try:
         return processChatMessage(conversationId, req.userText, req.model, req.apiKey)
     except (httpx.HTTPError, RuntimeError) as error:
@@ -242,13 +313,8 @@ def createTurn(conversationId: int, req: CreateTurnRequest):
 
 @app.post("/conversations/{conversationId}/turns/stream")
 def createTurnStream(conversationId: int, req: CreateTurnRequest):
-    if getConversationSession(conversationId) is None:
-        raise HTTPException(status_code=404, detail="Conversation not found.")
-    if req.model is not None and not isValidModelSpec(req.model):
-        raise HTTPException(
-            status_code=422,
-            detail="model must be 'stub', 'ollama:<name>', 'openai:<name>', 'anthropic:<name>', or 'gemini:<name>'.",
-        )
+    requireConversation(conversationId)
+    requireValidModel(req.model)
 
     def events():
         # The response has already started (200, text/event-stream) by the
@@ -266,29 +332,25 @@ def createTurnStream(conversationId: int, req: CreateTurnRequest):
 
 @app.get("/conversations/{conversationId}/turns")
 def getTurns(conversationId: int):
-    if getConversationSession(conversationId) is None:
-        raise HTTPException(status_code=404, detail="Conversation not found.")
+    requireConversation(conversationId)
     return listConversationTurns(conversationId)
 
 
 @app.post("/conversations/{conversationId}/analyze")
 def analyze(conversationId: int):
-    if getConversationSession(conversationId) is None:
-        raise HTTPException(status_code=404, detail="Conversation not found.")
+    requireConversation(conversationId)
     return analyzeConversation(conversationId)
 
 
 @app.get("/conversations/{conversationId}/graph")
 def getGraph(conversationId: int):
-    if getConversationSession(conversationId) is None:
-        raise HTTPException(status_code=404, detail="Conversation not found.")
+    requireConversation(conversationId)
     return listConversationGraph(conversationId)
 
 
 @app.get("/conversations/{conversationId}/concept-links")
 def getConversationConceptLinks(conversationId: int):
-    if getConversationSession(conversationId) is None:
-        raise HTTPException(status_code=404, detail="Conversation not found.")
+    requireConversation(conversationId)
     return listConversationConceptLinks(conversationId)
 
 
@@ -298,6 +360,39 @@ def getConversationSummary(conversationId: int):
     if summary is None:
         raise HTTPException(status_code=404, detail="Conversation not found.")
     return summary
+
+
+@app.post("/conversations/{conversationId}/summary/llm")
+def getLlmSummary(conversationId: int, req: LlmSummaryRequest):
+    requireValidModel(req.model)
+    summary = buildLlmSummary(conversationId, req.model, req.apiKey)
+    if summary is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return summary
+
+
+@app.get("/conversations/{conversationId}/context-health")
+def getContextHealth(conversationId: int):
+    health = buildContextHealth(conversationId)
+    if health is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return health
+
+
+@app.post("/ingest/conversations", status_code=status.HTTP_200_OK)
+def ingestConversationEndpoint(req: IngestConversationRequest):
+    if req.source not in SOURCES:
+        raise HTTPException(status_code=422, detail=f"source must be one of {list(SOURCES)}.")
+    try:
+        return ingestConversation(
+            req.source,
+            req.externalId,
+            [message.model_dump() for message in req.messages],
+            req.title,
+            req.url,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @app.get("/conversations/{conversationId}/report")
@@ -323,12 +418,12 @@ def getConversationReport(conversationId: int, format: str = "markdown"):
 
 
 @app.get("/search")
-def search(query: str, limit: int = 20):
+def search(query: str, limit: int = 20, conversationId: int | None = None):
     if not query.strip():
         raise HTTPException(status_code=422, detail="query must not be empty.")
     if not 1 <= limit <= 100:
         raise HTTPException(status_code=422, detail="limit must be between 1 and 100.")
-    return searchConversations(query, limit)
+    return searchConversations(query, limit, conversationId)
 
 
 @app.get("/concepts/graph")
@@ -363,8 +458,7 @@ def deleteConceptLink(linkId: int):
 
 @app.post("/edges", status_code=status.HTTP_201_CREATED)
 def createEdge(req: CreateEdgeRequest):
-    if getConversationSession(req.conversationId) is None:
-        raise HTTPException(status_code=404, detail="Conversation not found.")
+    requireConversation(req.conversationId)
     if req.label not in EDGE_LABELS:
         raise HTTPException(status_code=422, detail=f"label must be one of {list(EDGE_LABELS)}.")
     if not 0.0 <= req.confidence <= 1.0:

@@ -16,6 +16,7 @@ embeddingDimensions = 384
 _schemaReady = False
 _nextSchemaAttempt = 0.0
 schemaRetrySeconds = 30.0
+connectTimeoutSeconds = 3
 defaultDatabaseUrl = "postgresql://conversation_tree:conversation_tree@127.0.0.1:5432/conversation_tree"
 
 
@@ -34,7 +35,8 @@ def enabled() -> bool:
 def _connect():
     import psycopg
 
-    return psycopg.connect(_databaseUrl())
+    # Bounded, so an unreachable (rather than refusing) host can't hang a request.
+    return psycopg.connect(_databaseUrl(), connect_timeout=connectTimeoutSeconds)
 
 
 def _embeddingLiteral(embedding) -> str:
@@ -132,6 +134,20 @@ def upsertEmbedding(conversationId: int, turnId: int, embedding) -> None:
                 )
     except Exception as error:
         logger.warning("could not mirror embedding to pgvector: %s", error)
+
+
+def deleteConversationVectors(conversationId: int) -> None:
+    """Drop a deleted or rebuilt conversation's mirrored vectors."""
+    if not ensureSchema():
+        return
+    try:
+        with _connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM conversation_vectors WHERE conversation_id = %s", (conversationId,)
+                )
+    except Exception as error:
+        logger.warning("could not delete mirrored vectors: %s", error)
 
 
 def searchConversation(

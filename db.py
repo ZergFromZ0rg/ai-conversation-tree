@@ -121,6 +121,20 @@ def initDb():
         if "model" not in conversationColumns:
             connection.execute("ALTER TABLE conversations ADD COLUMN model TEXT")
 
+        # Migrate databases created before browser-extension ingestion: a
+        # conversation imported from ChatGPT / Claude / Gemini remembers where
+        # it came from so a re-sync updates it instead of duplicating it.
+        for column in ("source", "externalId", "sourceUrl"):
+            if column not in conversationColumns:
+                connection.execute(f"ALTER TABLE conversations ADD COLUMN {column} TEXT")
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idxConversationsSource
+            ON conversations(source, externalId)
+            WHERE source IS NOT NULL AND externalId IS NOT NULL
+            """
+        )
+
         # Migrate databases that stored embeddings as JSON text.
         embeddingColumns = {
             row["name"]
@@ -251,15 +265,20 @@ def _migrateConceptLinksToKeys(connection: sqlite3.Connection) -> None:
         )
 
 
-def createConversation(title: str | None = None) -> int:
+def createConversation(
+    title: str | None = None,
+    source: str | None = None,
+    externalId: str | None = None,
+    sourceUrl: str | None = None,
+) -> int:
     connection = getConnection()
     try:
         cursor = connection.execute(
             """
-            INSERT INTO conversations (title, createdAt, updatedAt)
-            VALUES (?, datetime('now'), datetime('now'))
+            INSERT INTO conversations (title, source, externalId, sourceUrl, createdAt, updatedAt)
+            VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
             """,
-            (title,),
+            (title, source, externalId, sourceUrl),
         )
         connection.commit()
         return int(cursor.lastrowid)
@@ -272,7 +291,7 @@ def listConversations() -> list[dict]:
     try:
         rows = connection.execute(
             """
-            SELECT id, title, model, createdAt, updatedAt
+            SELECT id, title, model, source, externalId, sourceUrl, createdAt, updatedAt
             FROM conversations
             ORDER BY updatedAt DESC, id DESC
             """
@@ -285,6 +304,8 @@ def listConversations() -> list[dict]:
             "id": int(row["id"]),
             "title": row["title"],
             "model": row["model"],
+            "source": row["source"],
+            "sourceUrl": row["sourceUrl"],
             "createdAt": str(row["createdAt"]),
             "updatedAt": str(row["updatedAt"]),
         }
@@ -297,7 +318,7 @@ def getConversation(conversationId: int) -> dict | None:
     try:
         row = connection.execute(
             """
-            SELECT id, title, model, createdAt, updatedAt
+            SELECT id, title, model, source, externalId, sourceUrl, createdAt, updatedAt
             FROM conversations
             WHERE id = ?
             """,
@@ -313,9 +334,69 @@ def getConversation(conversationId: int) -> dict | None:
         "id": int(row["id"]),
         "title": row["title"],
         "model": row["model"],
+        "source": row["source"],
+        "sourceUrl": row["sourceUrl"],
         "createdAt": str(row["createdAt"]),
         "updatedAt": str(row["updatedAt"]),
     }
+
+
+def findConversationBySource(source: str, externalId: str) -> dict | None:
+    connection = getConnection()
+    try:
+        row = connection.execute(
+            "SELECT id FROM conversations WHERE source = ? AND externalId = ?",
+            (source, externalId),
+        ).fetchone()
+    finally:
+        connection.close()
+    return getConversation(int(row["id"])) if row is not None else None
+
+
+def updateConversationSource(conversationId: int, title: str | None, sourceUrl: str | None) -> None:
+    """Refresh an imported conversation's title / URL without touching turns."""
+    connection = getConnection()
+    try:
+        connection.execute(
+            """
+            UPDATE conversations
+            SET title = COALESCE(?, title), sourceUrl = COALESCE(?, sourceUrl)
+            WHERE id = ?
+            """,
+            (title, sourceUrl, conversationId),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def clearConversationTurns(conversationId: int) -> None:
+    """Remove every turn (and its edges, concepts, embeddings) but keep the
+    conversation row. Used when a re-synced chat diverged from what was stored
+    (an edited prompt or regenerated answer), so the history is rebuilt."""
+    connection = getConnection()
+    try:
+        for table in ("semanticEdges", "turnConcepts", "turnEmbeddings", "turns"):
+            connection.execute(f"DELETE FROM {table} WHERE conversationId = ?", (conversationId,))
+        pruneOrphanConceptLinks(connection)
+        connection.execute(
+            "UPDATE conversations SET updatedAt = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = ?",
+            (conversationId,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    _dropMirroredVectors(conversationId)
+
+
+def _dropMirroredVectors(conversationId: int) -> None:
+    """Best-effort: remove a conversation's rows from the optional pgvector index."""
+    try:
+        from vectorStore import deleteConversationVectors
+
+        deleteConversationVectors(conversationId)
+    except Exception:
+        pass
 
 
 def getConversationVersion(conversationId: int) -> str | None:
@@ -388,12 +469,15 @@ def deleteConversation(conversationId: int) -> bool:
         # at those now-gone conceptKeys would otherwise dangle.
         pruneOrphanConceptLinks(connection)
         connection.commit()
-        return cursor.rowcount > 0
+        deleted = cursor.rowcount > 0
     finally:
         connection.close()
+    if deleted:
+        _dropMirroredVectors(conversationId)
+    return deleted
 
 
-def saveTurn(
+def saveTurnBundle(
     conversationId: int,
     turnId: int,
     userText: str,
@@ -401,7 +485,13 @@ def saveTurn(
     timestamp: str,
     root: bool,
     timelineParent: int | None,
-):
+    embeddingBytes: bytes,
+    semanticParents: list[tuple[int, str, float]],
+    conceptIds: list[int],
+) -> None:
+    """Persist one new turn with its embedding, classifier edges, and concept
+    memberships in a single transaction, so a failure part-way never leaves a
+    turn without its embedding or edges."""
     connection = getConnection()
     try:
         connection.execute(
@@ -409,91 +499,24 @@ def saveTurn(
             INSERT INTO turns (turnId, conversationId, userText, aiText, timestamp, root, timelineParent)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (
-                turnId,
-                conversationId,
-                userText,
-                aiText,
-                timestamp,
-                int(root),
-                timelineParent,
-            ),
+            (turnId, conversationId, userText, aiText, timestamp, int(root), timelineParent),
         )
         connection.execute(
-            """
-            UPDATE conversations
-            SET updatedAt = strftime('%Y-%m-%d %H:%M:%f', 'now')
-            WHERE id = ?
-            """,
-            (conversationId,),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-
-
-def saveTurnEmbedding(conversationId: int, turnId: int, embeddingBytes: bytes) -> None:
-    connection = getConnection()
-    try:
-        connection.execute(
-            """
-            INSERT OR REPLACE INTO turnEmbeddings (conversationId, turnId, embedding)
-            VALUES (?, ?, ?)
-            """,
+            "INSERT OR REPLACE INTO turnEmbeddings (conversationId, turnId, embedding) VALUES (?, ?, ?)",
             (conversationId, turnId, sqlite3.Binary(embeddingBytes)),
         )
-        connection.commit()
-    finally:
-        connection.close()
-    try:
-        import numpy as np
-        from vectorStore import upsertEmbedding
-
-        upsertEmbedding(conversationId, turnId, np.frombuffer(embeddingBytes, dtype=np.float32))
-    except Exception:
-        # PostgreSQL is an optional ANN accelerator; SQLite persistence must
-        # remain reliable when it is not configured or temporarily offline.
-        pass
-
-
-def saveSemanticEdges(conversationId: int, toTurnId: int, semanticParents: list[tuple[int, str, float]]):
-    connection = getConnection()
-    try:
         connection.executemany(
             """
             INSERT INTO semanticEdges (conversationId, fromTurnId, toTurnId, label, confidence, origin)
             VALUES (?, ?, ?, ?, ?, 'auto')
             """,
             [
-                (conversationId, fromTurnId, toTurnId, label, confidence)
+                (conversationId, fromTurnId, turnId, label, confidence)
                 for fromTurnId, label, confidence in semanticParents
             ],
         )
-        connection.commit()
-    finally:
-        connection.close()
-
-
-def conceptKeyMap(conversationId: int) -> dict[int, str]:
-    """Current conceptId -> stable conceptKey for one conversation."""
-    connection = getConnection()
-    try:
-        rows = connection.execute(
-            """
-            SELECT DISTINCT conceptId, conceptKey
-            FROM turnConcepts
-            WHERE conversationId = ? AND conceptKey IS NOT NULL
-            """,
-            (conversationId,),
-        ).fetchall()
-    finally:
-        connection.close()
-    return {int(row["conceptId"]): row["conceptKey"] for row in rows}
-
-
-def saveConceptIds(conversationId: int, turnId: int, conceptIds: list[int]):
-    connection = getConnection()
-    try:
+        # A root turn introduces a brand-new concept; inheriting turns reuse the
+        # key already on that concept's earlier members.
         keyByConceptId = {
             int(row["conceptId"]): row["conceptKey"]
             for row in connection.execute(
@@ -502,25 +525,34 @@ def saveConceptIds(conversationId: int, turnId: int, conceptIds: list[int]):
                 (conversationId,),
             ).fetchall()
         }
-        rows = []
+        conceptRows = []
         for conceptId in conceptIds:
             key = keyByConceptId.get(conceptId)
             if key is None:
-                # A root turn introduces a brand-new concept; inheriting turns
-                # reuse the key already on that concept's earlier members.
                 key = uuid.uuid4().hex
                 keyByConceptId[conceptId] = key
-            rows.append((conversationId, turnId, conceptId, key))
+            conceptRows.append((conversationId, turnId, conceptId, key))
         connection.executemany(
-            """
-            INSERT INTO turnConcepts (conversationId, turnId, conceptId, conceptKey)
-            VALUES (?, ?, ?, ?)
-            """,
-            rows,
+            "INSERT INTO turnConcepts (conversationId, turnId, conceptId, conceptKey) VALUES (?, ?, ?, ?)",
+            conceptRows,
         )
+        touchConversation(connection, conversationId)
         connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
     finally:
         connection.close()
+
+    # PostgreSQL is an optional ANN accelerator; SQLite persistence must stay
+    # reliable when it is not configured or temporarily offline.
+    try:
+        import numpy as np
+        from vectorStore import upsertEmbedding
+
+        upsertEmbedding(conversationId, turnId, np.frombuffer(embeddingBytes, dtype=np.float32))
+    except Exception:
+        pass
 
 
 def applyReclassification(
@@ -744,7 +776,7 @@ def getAllSearchTurns() -> list[dict]:
         rows = connection.execute(
             """
             SELECT turns.conversationId, turns.turnId, turns.userText, turns.aiText,
-                   conversations.title AS conversationTitle
+                   conversations.title AS conversationTitle, conversations.source AS source
             FROM turns
             JOIN conversations ON conversations.id = turns.conversationId
             ORDER BY turns.conversationId, turns.turnId
@@ -759,6 +791,7 @@ def getAllSearchTurns() -> list[dict]:
             "userText": str(row["userText"]),
             "aiText": str(row["aiText"]),
             "conversationTitle": row["conversationTitle"],
+            "source": row["source"],
         }
         for row in rows
     ]

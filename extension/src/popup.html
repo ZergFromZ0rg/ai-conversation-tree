@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>AI Conversation Tree</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <h1>AI Conversation Tree</h1>
+    <p id="site" class="muted">Checking this tab…</p>
+    <button id="sync" type="button" disabled>Send this chat to the tree</button>
+    <p id="status" role="status"></p>
+    <a id="open" href="#" target="_blank" rel="noreferrer" hidden>Open in the tree →</a>
+
+    <details>
+      <summary>Settings</summary>
+      <label>Server URL <input id="serverUrl" type="url" placeholder="http://127.0.0.1:8000" /></label>
+      <label>API token <input id="token" type="password" placeholder="only if the server requires one" autocomplete="off" /></label>
+      <label class="check"><input id="autoSync" type="checkbox" /> Sync automatically after each reply</label>
+      <button id="save" type="button" class="secondary">Save</button>
+    </details>
+    <script src="popup.js"></script>
+  </body>
+</html>

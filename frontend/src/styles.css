@@ -1456,3 +1456,241 @@ button {
     }
   }
 }
+
+/* ---------- search results, imported-source badge, context health ---------- */
+
+.sourceBadge {
+  flex-shrink: 0;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.searchScope {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.searchScope button {
+  padding: 3px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.searchScope button.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.searchScope button:disabled {
+  opacity: 0.45;
+}
+
+.searchHint {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.searchGroups {
+  display: grid;
+  gap: 16px;
+  margin-top: 14px;
+}
+
+.searchGroup h3 {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.searchGroup h3 > span:first-child {
+  color: var(--text);
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.searchGroupCount {
+  margin-left: auto;
+  font-weight: 400;
+}
+
+.searchHit {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 9px 12px;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
+.searchHitActive {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.searchHitMeta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.searchHitScore {
+  margin-left: auto;
+}
+
+.matchTag {
+  padding: 0 6px;
+  border-radius: 4px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+  background: var(--bg-hover);
+}
+
+.matchTag--question {
+  color: var(--accent-strong);
+}
+
+.searchHitSnippet {
+  font-size: 13.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.searchHitSnippet mark {
+  padding: 0 1px;
+  border-radius: 3px;
+  background: rgba(250, 204, 21, 0.35);
+  color: inherit;
+}
+
+.contextHealth {
+  margin-top: 20px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.contextHealth h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+
+.contextHealth ul {
+  display: grid;
+  gap: 4px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.contextHealth li button {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  width: 100%;
+  padding: 7px 10px;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.contextHealth li button:hover {
+  border-color: var(--accent);
+}
+
+.riskPill {
+  flex-shrink: 0;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  background: var(--bg-hover);
+  color: var(--text-muted);
+}
+
+.riskPill--low {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.riskPill--medium {
+  background: rgba(245, 158, 11, 0.16);
+  color: #b45309;
+}
+
+.riskPill--high {
+  background: rgba(220, 38, 38, 0.14);
+  color: var(--danger);
+}
+
+@media (prefers-color-scheme: dark) {
+  .riskPill--medium {
+    color: #fbbf24;
+  }
+}
+
+.contextFlag {
+  margin: -2px 0 6px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.contextFlag--high {
+  color: var(--danger);
+  background: rgba(220, 38, 38, 0.1);
+}
+
+@media (prefers-color-scheme: dark) {
+  .contextFlag {
+    color: #fbbf24;
+  }
+}
+
+.contextHorizon {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 18px 0 14px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.contextHorizon::before,
+.contextHorizon::after {
+  content: "";
+  flex: 1;
+  border-top: 1px dashed var(--border-strong);
+}

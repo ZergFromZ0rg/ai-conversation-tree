@@ -1,0 +1,18 @@
+:root { color-scheme: light dark; --fg: #1f2937; --bg: #fff; --muted: #6b7280; --accent: #0f766e; --line: #e5e7eb; }
+@media (prefers-color-scheme: dark) { :root { --fg: #e5e7eb; --bg: #1b1f24; --muted: #9ca3af; --accent: #2dd4bf; --line: #333a42; } }
+body { width: 320px; margin: 0; padding: 14px; font: 13px/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+h1 { font-size: 14px; margin: 0 0 6px; }
+.muted { color: var(--muted); margin: 0 0 10px; }
+button { width: 100%; padding: 8px 10px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+@media (prefers-color-scheme: dark) { button { color: #04201c; } }
+button:disabled { opacity: 0.45; cursor: default; }
+button.secondary { background: transparent; color: var(--fg); border: 1px solid var(--line); margin-top: 8px; }
+#status { min-height: 18px; margin: 8px 0 4px; }
+#status.error { color: #dc2626; }
+#status.ok { color: #16a34a; }
+a { color: var(--accent); }
+details { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+summary { cursor: pointer; color: var(--muted); }
+label { display: block; margin-top: 8px; color: var(--muted); }
+label input[type="url"], label input[type="password"] { display: block; width: 100%; box-sizing: border-box; margin-top: 3px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--fg); font: inherit; }
+label.check { display: flex; gap: 6px; align-items: center; color: var(--fg); }

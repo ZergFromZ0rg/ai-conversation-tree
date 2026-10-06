@@ -1,0 +1,28 @@
+# Hosted / always-on deployment.
+#
+#   AI_CONVERSATION_TREE_API_TOKEN=$(openssl rand -hex 24) docker compose up -d --build
+#
+# Put a TLS-terminating reverse proxy (Caddy, nginx, a cloud load balancer) in
+# front of port 8000 — the token travels in a header and must not cross the
+# network in clear text.
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Required for anything reachable from the internet. Every API route
+      # (including the extension's ingest endpoint) demands it as a bearer token.
+      AI_CONVERSATION_TREE_API_TOKEN: ${AI_CONVERSATION_TREE_API_TOKEN:?set a token before exposing this}
+      # Reply generation: "stub" needs nothing; set one of these to use a real model.
+      AI_CONVERSATION_TREE_STUB_LLM: ${AI_CONVERSATION_TREE_STUB_LLM:-1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5-mini}
+      # Size of the context window assumed by context-loss detection.
+      AI_CONVERSATION_TREE_CONTEXT_TOKENS: ${AI_CONVERSATION_TREE_CONTEXT_TOKENS:-8000}
+    volumes:
+      - act-data:/data
+    restart: unless-stopped
+
+volumes:
+  act-data:

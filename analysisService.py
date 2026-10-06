@@ -41,7 +41,7 @@ def _topicTerms(turns: list[dict], limit: int = 8) -> list[str]:
     return [term for term, _ in counts.most_common(limit)]
 
 
-def buildConversationSummary(conversationId: int) -> dict:
+def buildConversationSummary(conversationId: int) -> dict | None:
     conversation = getConversation(conversationId)
     if conversation is None:
         return None
@@ -73,12 +73,39 @@ def buildConversationSummary(conversationId: int) -> dict:
     }
 
 
-def searchConversations(query: str, limit: int = 20) -> dict:
+def _matchedTerms(queryTerms: list[str], text: str) -> list[str]:
+    lowered = text.lower()
+    return [term for term in queryTerms if term in lowered]
+
+
+def _snippet(text: str, terms: list[str], radius: int = 110) -> str:
+    """A window of `text` around its first matched term (or its opening)."""
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= radius * 2:
+        return collapsed
+    lowered = collapsed.lower()
+    anchor = min((at for at in (lowered.find(term) for term in terms) if at >= 0), default=0)
+    start = max(anchor - radius // 2, 0)
+    end = min(start + radius * 2, len(collapsed))
+    return ("…" if start > 0 else "") + collapsed[start:end].strip() + ("…" if end < len(collapsed) else "")
+
+
+def searchConversations(query: str, limit: int = 20, conversationId: int | None = None) -> dict:
+    """Hybrid search across every stored turn.
+
+    Semantic similarity (embedding cosine) finds turns that talk about the same
+    thing in different words; a lexical pass rewards turns that contain the
+    query's own words and tells the UI which words to highlight. Each hit says
+    whether the match was in the question or the answer, carries a snippet
+    around the match, and its position in the conversation so the viewer can
+    jump straight to the turn.
+    """
     query = query.strip()
     if not query:
         return {"query": query, "results": []}
+    queryTerms = list(dict.fromkeys(_terms(query)))
     embedding = encodeText(query)
-    vectorRows = searchWorkspace(embedding, limit)
+    vectorRows = searchWorkspace(embedding, limit * 4 if conversationId is None else 100000)
     if vectorRows is None:
         queryVector = np.asarray(embedding, dtype=np.float32)
         queryNorm = max(float(np.linalg.norm(queryVector)), 1e-8)
@@ -87,28 +114,106 @@ def searchConversations(query: str, limit: int = 20) -> dict:
             candidate = np.frombuffer(row["embedding"], dtype=np.float32)
             score = float(candidate @ queryVector) / max(float(np.linalg.norm(candidate)) * queryNorm, 1e-8)
             scored.append((row["conversationId"], row["turnId"], score))
-        vectorRows = sorted(scored, key=lambda item: item[2], reverse=True)[:limit]
-    turnsByKey = {
-        (row["conversationId"], row["turnId"]): row for row in getAllSearchTurns()
-    }
-    results = []
-    for conversationId, turnId, score in vectorRows:
-        if score < minimumSearchScore:
+        vectorRows = scored
+    semanticByKey = {(cid, tid): score for cid, tid, score in vectorRows}
+
+    allTurns = getAllSearchTurns()
+    turnCounts = Counter(row["conversationId"] for row in allTurns)
+    candidates = []
+    for row in allTurns:
+        if conversationId is not None and row["conversationId"] != conversationId:
             continue
-        row = turnsByKey.get((conversationId, turnId))
-        if row is None:
+        key = (row["conversationId"], row["turnId"])
+        semantic = semanticByKey.get(key, 0.0)
+        questionTerms = _matchedTerms(queryTerms, row["userText"])
+        answerTerms = _matchedTerms(queryTerms, row["aiText"])
+        matched = list(dict.fromkeys(questionTerms + answerTerms))
+        lexical = len(matched) / len(queryTerms) if queryTerms else 0.0
+        if semantic < minimumSearchScore and not matched:
             continue
-        results.append(
+        # Weight a question hit over an answer hit: the user's own phrasing is
+        # the better "where did I ask about this" signal.
+        questionBoost = 0.04 if questionTerms else 0.0
+        final = 0.8 * max(semantic, 0.0) + 0.2 * lexical + questionBoost
+        inQuestion = len(questionTerms) >= len(answerTerms)
+        text = row["userText"] if inQuestion else row["aiText"]
+        candidates.append(
             {
-                "conversationId": conversationId,
+                "conversationId": row["conversationId"],
                 "conversationTitle": row["conversationTitle"],
-                "turnId": turnId,
+                "source": row["source"],
+                "turnId": row["turnId"],
+                "turnCount": turnCounts[row["conversationId"]],
                 "userText": row["userText"],
                 "aiText": row["aiText"],
-                "score": round(float(score), 4),
+                "matchIn": "question" if inQuestion else "answer",
+                "snippet": _snippet(text, matched),
+                "matchedTerms": matched,
+                "semanticScore": round(float(semantic), 4),
+                "score": round(min(float(final), 1.0), 4),
             }
         )
-    return {"query": query, "results": results}
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    return {"query": query, "terms": queryTerms, "results": candidates[:limit]}
+
+
+_summaryCache: dict[tuple, dict] = {}
+_summaryPrompt = (
+    "Summarize the conversation below in 3-5 sentences of plain prose. Say what the user was "
+    "trying to do, the main conclusions or answers reached, and any threads left open. "
+    "No preamble, no bullet points, no markdown headings.\n\n"
+)
+_summaryTranscriptChars = 12000
+
+
+def _transcriptForSummary(turns: list[dict]) -> str:
+    lines = []
+    for turn in turns:
+        lines.append(f"User: {_shorten(turn['userText'], 600)}")
+        lines.append(f"Assistant: {_shorten(turn['aiText'], 600)}")
+    transcript = "\n".join(lines)
+    if len(transcript) > _summaryTranscriptChars:
+        # Keep the opening (the goal) and the end (where it landed).
+        half = _summaryTranscriptChars // 2
+        transcript = transcript[:half] + "\n[...middle of the conversation omitted...]\n" + transcript[-half:]
+    return transcript
+
+
+def buildLlmSummary(conversationId: int, model: str | None = None, apiKey: str | None = None) -> dict | None:
+    """The structured summary with its prose replaced by a model-written one.
+
+    Falls back to the local summary (mode "structured-local", with the reason)
+    when the stub provider is selected or the provider fails, so the caller
+    always gets a usable summary.
+    """
+    from chatService import envDefaultModelSpec, generateAiText
+
+    base = buildConversationSummary(conversationId)
+    if base is None or base["turnCount"] == 0:
+        return base
+    conversation = getConversation(conversationId)
+    modelSpec = model or (conversation or {}).get("model") or envDefaultModelSpec()
+    if modelSpec == "stub":
+        return {**base, "fallbackReason": "The stub model can't write summaries; pick a real model."}
+
+    turns = getConversationTurns(conversationId)
+    lastTurn = turns[-1]
+    cacheKey = (conversationId, len(turns), hash(lastTurn["userText"] + lastTurn["aiText"]), modelSpec)
+    cached = _summaryCache.get(cacheKey)
+    if cached is not None:
+        return cached
+
+    try:
+        text = generateAiText(_summaryPrompt + _transcriptForSummary(turns), modelSpec, apiKey).strip()
+    except Exception as error:  # provider errors vary widely; never fail the panel
+        return {**base, "fallbackReason": f"Model call failed: {error}"}
+    if not text:
+        return {**base, "fallbackReason": "The model returned no text."}
+    result = {**base, "summary": text, "mode": "llm", "model": modelSpec}
+    _summaryCache[cacheKey] = result
+    if len(_summaryCache) > 64:
+        _summaryCache.pop(next(iter(_summaryCache)))
+    return result
 
 
 def buildConversationReport(conversationId: int) -> dict | None:

@@ -74,9 +74,16 @@ function readApiKeys() {
   }
 }
 
+// The extension's "Open in the tree" link is /ui?c=<conversationId>.
+function readDeepLinkConversation() {
+  const raw = new URLSearchParams(window.location.search).get("c");
+  const id = raw ? Number.parseInt(raw, 10) : NaN;
+  return Number.isNaN(id) ? null : id;
+}
+
 export function App() {
   const [conversations, setConversations] = useState([]);
-  const [conversationId, setConversationId] = useState(null);
+  const [conversationId, setConversationId] = useState(readDeepLinkConversation);
   const [selectedTurnId, setSelectedTurnId] = useState(null);
   const [drawerOpen, setDrawerOpen] = useState(readDrawerPreference);
   const [sidebarOpen, setSidebarOpen] = useState(readSidebarPreference);
@@ -91,6 +98,7 @@ export function App() {
     turns,
     graph,
     conceptLinks,
+    contextHealth,
     status,
     pendingUserText,
     streamingText,
@@ -187,13 +195,24 @@ export function App() {
 
   useEffect(() => {
     function onKeyDown(event) {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "g") {
+      if (!(event.metaKey || event.ctrlKey)) return;
+      const key = event.key.toLowerCase();
+      if (key === "g") {
         event.preventDefault();
         setDrawerOpen((open) => !open);
+      } else if (key === "k") {
+        event.preventDefault();
+        setAnalysisMode("search");
       }
     }
+    // A hosted server answered 401: take the user straight to the token field.
+    const onUnauthorized = () => setSettingsOpen(true);
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("act:unauthorized", onUnauthorized);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("act:unauthorized", onUnauthorized);
+    };
   }, []);
 
   const selectConversation = useCallback(
@@ -220,6 +239,16 @@ export function App() {
       }
     },
     [conversations, conversationId, refresh],
+  );
+
+  // Search results and context-health flags land on a specific turn: open its
+  // conversation, then select the turn (the transcript scrolls to it once loaded).
+  const openTurn = useCallback(
+    (id, turnId) => {
+      selectConversation(id);
+      setSelectedTurnId(turnId);
+    },
+    [selectConversation],
   );
 
   const createConversation = useCallback(async () => {
@@ -308,7 +337,7 @@ export function App() {
           >
             Map
           </button>
-          <button type="button" className="ghostButton" onClick={() => setAnalysisMode("search")}>Search</button>
+          <button type="button" className="ghostButton" onClick={() => setAnalysisMode("search")} title="Search all chats (Cmd/Ctrl+K)">Search</button>
           <button type="button" className="ghostButton" onClick={() => setAnalysisMode("summary")} disabled={!conversationId}>Summary</button>
           <button type="button" className="ghostButton" onClick={() => void exportReport("markdown")} disabled={!conversationId}>Export</button>
           <button
@@ -334,6 +363,7 @@ export function App() {
           isSending={status === "sending"}
           selectedTurnId={selectedTurnId}
           onSelectTurn={setSelectedTurnId}
+          contextHealth={contextHealth}
           hasConversation={Boolean(conversationId)}
         />
 
@@ -386,8 +416,10 @@ export function App() {
         <AnalysisPanel
           mode={analysisMode}
           conversationId={conversationId}
+          model={selectedModel}
+          apiKey={selectedModelApiKey}
           onClose={() => setAnalysisMode(null)}
-          onOpenConversation={selectConversation}
+          onOpenTurn={openTurn}
         />
       ) : null}
     </div>

@@ -21,10 +21,7 @@ from db import (
     listConceptLinksForConversation,
     listConversations,
     listConversationEdges,
-    saveConceptIds,
-    saveSemanticEdges,
-    saveTurn,
-    saveTurnEmbedding,
+    saveTurnBundle,
     setConversationModel,
     setConversationTitle,
     updateEdge,
@@ -544,7 +541,7 @@ def buildConversationPayload(conversationId: int) -> dict:
 
 
 def persistGraphTurn(conversationId: int, turn) -> None:
-    saveTurn(
+    saveTurnBundle(
         conversationId=conversationId,
         turnId=turn.id,
         userText=turn.userText,
@@ -552,10 +549,10 @@ def persistGraphTurn(conversationId: int, turn) -> None:
         timestamp=turn.timestamp.isoformat() if isinstance(turn.timestamp, datetime) else str(turn.timestamp),
         root=turn.root,
         timelineParent=turn.timelineParent,
+        embeddingBytes=turn.embedding.astype("float32").tobytes(),
+        semanticParents=turn.semanticParents,
+        conceptIds=turn.conceptIds,
     )
-    saveTurnEmbedding(conversationId, turn.id, turn.embedding.astype("float32").tobytes())
-    saveSemanticEdges(conversationId, turn.id, turn.semanticParents)
-    saveConceptIds(conversationId, turn.id, turn.conceptIds)
 
 
 def createConversationSession(title: str | None = None, model: str | None = None) -> dict:
@@ -850,7 +847,3 @@ def removeConversationEdge(edgeId: int) -> bool:
     if deleted and edge is not None:
         invalidate(edge["conversationId"])
     return deleted
-
-
-def getConversationEdge(edgeId: int) -> dict | None:
-    return getEdge(edgeId)

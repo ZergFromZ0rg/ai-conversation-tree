@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { api, getApiToken, setApiToken } from "../api";
 
 const PROVIDER_FIELDS = [
   { key: "openai", label: "OpenAI API key", placeholder: "sk-..." },
@@ -23,6 +23,7 @@ function pullProgressLabel(progress) {
 
 export function SettingsModal({ apiKeys, onSave, onClose, onModelsChanged }) {
   const [draft, setDraft] = useState(apiKeys);
+  const [serverToken, setServerToken] = useState(getApiToken);
   const [library, setLibrary] = useState(null);
   const [libraryError, setLibraryError] = useState(false);
   // Only one pull runs at a time — activePull names it (disabling other rows'
@@ -56,6 +57,7 @@ export function SettingsModal({ apiKeys, onSave, onClose, onModelsChanged }) {
 
   function handleSubmit(event) {
     event.preventDefault();
+    setApiToken(serverToken.trim());
     onSave(draft);
     onClose();
   }
@@ -117,6 +119,18 @@ export function SettingsModal({ apiKeys, onSave, onClose, onModelsChanged }) {
               />
             </label>
           ))}
+
+          <label className="settingsField">
+            <span>Server access token (hosted deployments only)</span>
+            <input
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              value={serverToken}
+              placeholder="leave empty for a local server"
+              onChange={(event) => setServerToken(event.target.value)}
+            />
+          </label>
 
           <div className="settingsDivider" />
 

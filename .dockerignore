@@ -1,0 +1,14 @@
+venv/
+.git/
+.data/
+__pycache__/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+frontend/node_modules/
+frontend/dist/
+extension/
+tests/
+docs/
+scripts/

@@ -229,10 +229,6 @@ def countPatternMatches(text: str, patterns: list[str]) -> int:
 
 # Discourse signals and gating
 
-def hasComparisonWithPriorTopic(features: dict) -> bool:
-    return features["comparisonScore"] > 0 and features["contentOverlap"] > 0
-
-
 def hasComparisonFollowup(features: dict) -> bool:
     # A comparison only counts when it is anchored to the prior topic.
     return (
@@ -814,6 +810,13 @@ def retrieveCrossLinkCandidates(graph: ConversationGraph, embedding, timelinePar
         excludeTurnId=timelineParent,
         limit=maxOlderCandidates * 2,
     ) if graph.conversationId is not None else None
+    # pgvector can still hold vectors for turns this in-memory graph doesn't
+    # have (mid-reanalysis the graph is being rebuilt turn by turn; after a
+    # rebuilt import the index may predate it). Only already-added turns count.
+    if pgCandidates:
+        pgCandidates = [
+            (turnId, score) for turnId, score in pgCandidates if 0 <= turnId < len(graph.turns)
+        ]
     if pgCandidates:
         return sorted(
             [

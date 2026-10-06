@@ -38,6 +38,15 @@ function TypingIndicator() {
   );
 }
 
+function ContextFlag({ flag }) {
+  const detail = flag.signals.map((signal) => signal.detail).join(" · ");
+  return (
+    <div className={`contextFlag contextFlag--${flag.level}`} title={detail}>
+      <span aria-hidden="true">⚠</span> Possible context loss — {flag.signals[0].detail}
+    </div>
+  );
+}
+
 export function ChatTranscript({
   turns,
   pendingUserText,
@@ -45,26 +54,49 @@ export function ChatTranscript({
   streamingText,
   selectedTurnId,
   onSelectTurn,
+  contextHealth,
   hasConversation,
 }) {
   const turnRefs = useRef(new Map());
   const bottomRef = useRef(null);
-
-  useEffect(() => {
-    if (selectedTurnId == null) {
-      return;
-    }
-    const node = turnRefs.current.get(selectedTurnId);
-    if (node) {
-      node.scrollIntoView({ behavior: "smooth", block: "start" });
-    }
-  }, [selectedTurnId]);
+  // A turn selected before its conversation finished loading (a search hit in
+  // another chat) can't be scrolled to yet; remember it and finish the jump
+  // when the turns arrive.
+  const pendingJumpRef = useRef(null);
 
   useEffect(() => {
     // Instant while text is actively growing (a "smooth" scroll per token
-    // would fight itself); smooth for turn/state changes otherwise.
+    // would fight itself); smooth for turn/state changes otherwise. Skipped
+    // while a jump to a specific turn is outstanding. (Declared before the
+    // jump effect so it still sees the pending jump on the render that
+    // delivers the turns.)
+    if (pendingJumpRef.current != null) {
+      return;
+    }
     bottomRef.current?.scrollIntoView({ behavior: streamingText ? "auto" : "smooth", block: "end" });
   }, [turns.length, pendingUserText, isSending, streamingText]);
+
+  useEffect(() => {
+    pendingJumpRef.current = selectedTurnId;
+  }, [selectedTurnId]);
+
+  useEffect(() => {
+    const target = pendingJumpRef.current;
+    if (target == null) {
+      return;
+    }
+    const node = turnRefs.current.get(target);
+    if (node) {
+      node.scrollIntoView({ behavior: "smooth", block: "start" });
+      pendingJumpRef.current = null;
+    }
+  }, [selectedTurnId, turns]);
+
+  const flagsByTurn = new Map(
+    (contextHealth?.flaggedTurns ?? [])
+      .filter((flag) => flag.level !== "low")
+      .map((flag) => [flag.turnId, flag]),
+  );
 
   if (!hasConversation) {
     return (
@@ -97,12 +129,21 @@ export function ChatTranscript({
               }
             }}
           >
+            {turn.id === contextHealth?.horizonTurnId ? (
+              <div className="contextHorizon">
+                <span>
+                  Earlier messages are probably outside the model&rsquo;s context window
+                  (~{contextHealth.windowTokens.toLocaleString()} tokens)
+                </span>
+              </div>
+            ) : null}
             <ChatMessage
               role="user"
               text={turn.userText}
               isSelected={turn.id === selectedTurnId}
               onSelect={() => onSelectTurn(turn.id)}
             />
+            {flagsByTurn.has(turn.id) ? <ContextFlag flag={flagsByTurn.get(turn.id)} /> : null}
             <ChatMessage
               role="assistant"
               text={turn.aiText}
