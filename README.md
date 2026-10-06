@@ -323,7 +323,12 @@ The first request for a conversation rebuilds its in-memory `ConversationGraph`
 from persisted rows; `graphStore` then keeps it cached. Each cache entry carries
 the conversation's SQLite `updatedAt` version and is reloaded when another
 backend process changes that conversation, so multiple workers do not retain
-stale graph state.
+stale graph state. A turn is written in one SQLite transaction (turn,
+embedding, classifier edges, concept memberships — all or nothing), and if a
+mutation fails part-way the cached graph is discarded and reloaded from SQLite,
+so memory never holds a turn the database doesn't. Because every write bumps
+`updatedAt`, the next request after a write reloads the graph; that is
+deliberate, as it is what keeps other workers from serving stale state.
 
 ## API
 
@@ -336,7 +341,8 @@ stale graph state.
 ### Conversation Endpoints
 
 - `POST /conversations` — optional `model` sets the conversation default
-- `GET /conversations`
+- `GET /conversations` — each entry carries `source` / `sourceUrl` when the
+  chat was imported by the extension (null otherwise)
 - `GET /conversations/{conversationId}`
 - `PATCH /conversations/{conversationId}` — set the conversation's default
   response model (`{"model": "ollama:<name>"}`); validated against the same
@@ -711,8 +717,11 @@ That local connection is the default. Set `PGVECTOR_DATABASE_URL` when using a
 different PostgreSQL instance. On the next request, the app creates the `vector` extension, mirrors new turn
 embeddings into PostgreSQL, and uses an HNSW cosine index for older-turn
 retrieval. SQLite remains the source of truth for conversations, turns, and
-graph edges. If PostgreSQL is unavailable, retrieval automatically falls back
-to the local NumPy implementation.
+graph edges. If PostgreSQL is unavailable (connections time out after 3
+seconds), retrieval automatically falls back to the local NumPy implementation.
+Deleting a conversation, or rebuilding an imported one, removes its vectors from
+the index, and retrieval ignores any vector for a turn the conversation's graph
+doesn't have, so a stale index can't produce a link to a missing turn.
 
 ### 2. Frontend build
 
