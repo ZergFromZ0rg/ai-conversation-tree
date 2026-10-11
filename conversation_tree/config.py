@@ -3,8 +3,9 @@
 Nothing in the package reads the environment or opens a database while it is
 being imported. A host builds a ``Settings`` (explicitly, or from the
 environment with ``Settings.fromEnv()``) and passes it to
-``conversation_tree.init``. Services that need a setting ask for it here, so
-two hosts can run with different databases without sharing any module state.
+``conversation_tree.init``. Services that need a setting ask for it here. The
+configuration is module-level state, so one process uses one configuration at a
+time; calling ``init`` again replaces it.
 """
 
 import os

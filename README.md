@@ -5,10 +5,12 @@ audit. It decides how each turn relates to the ones before it (continuation,
 branch, related, or a fresh topic), links concepts that recur across your
 conversations, and warns when a long chat has probably lost its own context.
 
-Chats get in two ways: type into the built-in viewer (local models, OpenAI,
-Anthropic, Gemini, or a stub), or **import conversations you already have**
-through the ingest API as role-tagged messages. The logic lives in a plain
-Python backend with a small HTTP surface, so the viewer is optional.
+It is both a small tool and a library. Run it as a server with a viewer: type
+into the built-in chat (local models, OpenAI, Anthropic, Gemini, or a stub), or
+**import conversations you already have** through the ingest API as role-tagged
+messages. Or import the `conversation_tree` package into another application and
+call the same logic directly, with your own database path and your own model
+layer (see "Using It As A Library"). The viewer and the HTTP layer are optional.
 
 It runs on your machine by default (SQLite, local embedding models, no
 accounts). It is a technically solid, explainable portfolio project, not a
@@ -59,13 +61,17 @@ Open <http://127.0.0.1:8000/ui>, then:
 
 ```mermaid
 flowchart LR
-    subgraph sources[Where chats come from]
+    subgraph sources[Where turns come from]
+        HOST["Your application<br/>appendTurn / processChatMessage"]
         IMP["Imported chats<br/>role-tagged messages"]
         UI["Built-in chat viewer"]
     end
+    HOST -- "Python calls" --> SVC
     IMP -- "POST /ingest/conversations" --> API
     UI -- "turns / stream" --> API
-    API["FastAPI"] --> CLS["Classifier<br/>embeddings + discourse + cross-encoder"]
+    API["HTTP layer (optional)<br/>FastAPI"] --> SVC["Services<br/>rules · one error contract"]
+    SVC -- "asks for replies" --> REP["Replier<br/>built-in providers or yours"]
+    SVC --> CLS["Classifier<br/>embeddings + discourse + cross-encoder"]
     CLS --> DB[("SQLite<br/>turns · edges · concepts · embeddings")]
     DB --> CON["Concept linker<br/>cross-conversation"]
     DB --> SRCH["Hybrid search"]
@@ -101,10 +107,14 @@ that conversation is scored against the concepts of every *other* conversation.
 Close pairs become `conceptLinks`, surfaced in the drawer as "also discussed
 elsewhere" and over `GET /concepts/graph`.
 
-Response generation runs through a stub, a local `Ollama` model, `OpenAI`,
-`Anthropic`, or `Gemini`. The environment sets the default; the UI and API can
-override it per conversation. Ollama, OpenAI, and Anthropic support native
-incremental streaming; Gemini currently falls back to one response chunk.
+Response generation is pluggable. By default a *replier* routes to a stub, a
+local `Ollama` model, `OpenAI`, `Anthropic`, or `Gemini`: the environment sets
+the default and the UI and API can override it per conversation. Each request
+carries the earlier turns that fit the context window, so a reply can see the
+conversation. Ollama, OpenAI, and Anthropic support native incremental
+streaming; Gemini currently falls back to one response chunk. A host with its
+own model layer plugs in its own replier, or skips generation and records
+finished turns with `appendTurn`.
 
 ## Core Approach
 
@@ -225,18 +235,20 @@ Discourse features are used as supporting evidence, not as ground truth. This re
 
 ## Tech Stack
 
-Backend:
+Core logic (`pip install .`, Python 3.10+):
 
-- `Python`
-- `FastAPI`
-- `SQLite`
-- `Pydantic`
 - `NumPy`
-- `sentence-transformers`
-- `CrossEncoder`
-- `PyTorch`
+- `sentence-transformers` and a `CrossEncoder`, on `PyTorch`
+- `SQLite`
+- `httpx`, for the model providers
+
+Optional:
+
+- `FastAPI`, `Pydantic`, and `uvicorn` — the HTTP layer and viewer shell
+  (`.[server]`)
+- `psycopg` + `pgvector` — scalable turn retrieval (`.[pgvector]`)
 - `Ollama` (local), `OpenAI`, `Anthropic`, or `Gemini` for response generation;
-  a stub mode needs neither
+  a stub mode needs none of them
 
 Frontend:
 
@@ -259,7 +271,7 @@ cheap, the embedding models load when `graphService` is first imported):
   - `python -m conversation_tree`: a tiny REPL that classifies turns you type
     in, no server or database involved
 - `conversationErrors.py`
-  - the services' error contract (see "Using The Services Directly")
+  - the services' error contract (see "Errors And Validation")
 - `chatService.py`
   - orchestration (conversations, turns, edges, concept links) and graph payload
     serialization. `appendTurn` is the entry point for recording a finished exchange
@@ -296,6 +308,8 @@ Elsewhere:
 - `requirements.txt` — the tested, pinned set that the Docker image and the
   quick start install
 - `tests/` — the pytest suite
+- `eval_*.py`, `eval_cases.json` — accuracy harnesses for the classifier and the
+  concept links (see Verification)
 - `scripts/seed_demo.py` — loads the demo workspace through the ingest API
 - `Dockerfile`, `docker-compose.yml` — hosted deployment
 
@@ -312,6 +326,18 @@ Frontend (`frontend/src/`):
     `GraphRail`, `GraphDrawer` (with the "also discussed elsewhere" panel),
     `TurnGraph`, `WorkspaceMap`
 
+## Using It As A Library
+
+The server and the viewer are one way to use this. The logic layer is a plain
+Python package, `conversation_tree`, that another application can import. It
+needs only NumPy, `sentence-transformers`, and `httpx`:
+
+```bash
+pip install -e .             # core logic only
+pip install -e ".[server]"   # + the FastAPI layer and uvicorn
+pip install -e ".[pgvector]" # + PostgreSQL/pgvector retrieval
+```
+
 ### Configuration
 
 Importing the package reads no environment, opens no database, and loads no
@@ -321,12 +347,13 @@ model. The host configures it once:
 import conversation_tree
 from conversation_tree import Settings
 
-conversation_tree.init(Settings(dbPath="/var/lib/odysseus/conversations.db"))
+conversation_tree.init(Settings(dbPath="/var/lib/myapp/conversations.db"))
 conversation_tree.warmup()   # optional: load the embedding models now, not on first use
 ```
 
 `init()` creates the database (idempotent) and drops any state tied to a
-previous configuration. Services called before it raise `NotConfiguredError`.
+previous configuration: the cached graphs, the concept-link timing, cached
+model-written summaries, and the pgvector schema state. Services called before it raise `NotConfiguredError`.
 `init()` with no argument reads the environment, which is what the bundled app
 does:
 
@@ -338,44 +365,39 @@ does:
 
 The HTTP-only options (`AI_CONVERSATION_TREE_API_TOKEN`,
 `AI_CONVERSATION_TREE_CORS_ORIGINS`) live in `api.ServerOptions`, so the logic
-layer never sees them. `createApp(settings, options)` configures the package in
-its startup hook and loads the models before accepting requests; serve it with
-`uvicorn --factory conversation_tree.api:createApp`. The built-in reply
-providers (`OPENAI_API_KEY`, `OLLAMA_BASE_URL`, `AI_CONVERSATION_TREE_STUB_LLM`, …)
-read their own settings from the environment when a reply is generated; a host
-that plugs in its own replier (below) never touches them.
+layer never sees them. `createApp(settings, options, replier)` configures the
+package in its startup hook and loads the models before accepting requests;
+serve it with `uvicorn --factory conversation_tree.api:createApp`. The built-in
+reply providers (`OPENAI_API_KEY`, `OLLAMA_BASE_URL`,
+`AI_CONVERSATION_TREE_STUB_LLM`, …) read their own settings from the environment
+when a reply is generated; a host that plugs in its own replier (below) never
+touches them.
 
 The embedding models (`all-MiniLM-L6-v2` and its cross-encoder) are fixed, not
 settings: the classifier thresholds were tuned for them and the pgvector table is
 sized for their 384 dimensions.
 
-### Using The Services Directly
+### Where Things Live
 
-The HTTP layer is a thin skin. Every rule (label and confidence ranges, edge
-direction, model-spec format, search limits, import sources) is enforced inside
-the service functions, so a caller that is not FastAPI gets the same behaviour.
-Import them from the package (`from conversation_tree import chatService`);
-the HTTP layer is not needed. Failures are signalled with the exceptions in
-`conversationErrors.py`, never with `None` / `False` returns or transport
-errors:
+Import from the modules directly (`from conversation_tree.chatService import
+appendTurn`); the HTTP layer is not needed.
 
-| Exception | Meaning | HTTP | Also a |
-| --- | --- | --- | --- |
-| `NotFoundError` | the conversation, edge, concept, or link doesn't exist | 404 | `LookupError` |
-| `InvalidInputError` | the request breaks a domain rule | 422 | `ValueError` |
-| `ProviderError` | the model provider failed, is unreachable, or isn't configured | 502 | `RuntimeError` |
-| `ConflictError` | a write collides with an existing record (a duplicate import) | 409 | |
-| `NotConfiguredError` | a service ran before `init()` | | `RuntimeError` |
+| To do this | Call |
+| --- | --- |
+| create, read, list, and delete conversations; set a conversation's model | `chatService.createConversationSession`, `getConversationSession`, `listConversationSessions`, `deleteConversationSession`, `setConversationSessionModel` |
+| record a finished exchange | `chatService.appendTurn` |
+| generate a reply and record it | `chatService.processChatMessage`, `streamChatMessage` |
+| import a whole chat (idempotent) | `ingestService.ingestConversation` |
+| read turns and the graph; re-run the classifier | `chatService.listConversationTurns`, `listConversationGraph`, `analyzeConversation` |
+| correct edges and concept links by hand | `chatService.createConversationEdge`, `patchConversationEdge`, `removeConversationEdge`, `createManualConceptLink`, `removeConceptLink` |
+| cross-conversation concepts | `chatService.listConceptGraph`, `listConversationConceptLinks`; `conceptIndex.relinkAllConceptLinks` |
+| search, summarise, export | `analysisService.searchConversations`, `buildConversationSummary`, `buildLlmSummary`, `buildConversationReport`, `reportAsMarkdown` |
+| check for context loss | `contextService.buildContextHealth` |
 
-All derive from `ConversationTreeError`. Provider calls translate `httpx`
-errors into `ProviderError`, so callers never depend on the HTTP client.
-`streamChatMessage` validates when it is *called* and raises before returning
-its iterator, so a caller can still reject a bad request before streaming;
-`ProviderError` surfaces while iterating.
+### Recording Turns You Generated Yourself
 
-**Recording turns you generated yourself.** A host that already has the reply
-(its own chat, its own model call) hands over the finished exchange; nothing is
-generated and no provider is involved:
+A host that already has the reply (its own chat, its own model call) hands over
+the finished exchange; nothing is generated and no provider is involved:
 
 ```python
 from conversation_tree.chatService import appendTurn, createConversationSession
@@ -389,10 +411,11 @@ result["turnId"], result["edges"]   # the turn is classified, persisted, and lin
 persists it, titles the conversation from its first question, and refreshes
 cross-chat concept links, exactly as a turn typed into the viewer would.
 
-**Plugging in your own model layer.** `processChatMessage`,
-`streamChatMessage`, and the model-written summary ask a *replier* for text.
-Pass a plain function of a `ReplyRequest`, or subclass `providers.Replier` for
-streaming, model validation, and a default model:
+### Plugging In Your Own Model Layer
+
+`processChatMessage`, `streamChatMessage`, and the model-written summary ask a
+*replier* for text. Pass a plain function of a `ReplyRequest`, or subclass
+`providers.Replier` for streaming, model validation, and a default model:
 
 ```python
 conversation_tree.init(settings, replier=lambda request: myLlm.chat(request.history, request.userText))
@@ -422,14 +445,53 @@ because its prompt already contains the transcript.
 
 An exception from a plain function is reported as `ProviderError`; a subclass
 should raise `ProviderError` itself for failures the caller ought to see as a
-provider problem, and anything else propagates as a bug. With no replier the
+provider problem, and anything else propagates as a bug. A reply must be real
+text: an empty, whitespace-only, or non-string reply (or stream chunk) is also a
+`ProviderError`, and nothing is recorded. With no replier the
 built-in providers are used: they send `history` in each provider's own format
 (Ollama, OpenAI, Anthropic, and Gemini; the stub ignores it), so replies from a
 real model see the earlier conversation.
 
+### Errors And Validation
+
+The HTTP layer is a thin skin. Every rule (label and confidence ranges, edge
+direction, model-spec format, search limits, import sources) is enforced inside
+the service functions, so a caller that is not FastAPI gets the same behaviour.
+Failures are signalled with the exceptions in `conversationErrors.py`, never
+with `None` / `False` returns or transport errors:
+
+| Exception | Meaning | HTTP | Also a |
+| --- | --- | --- | --- |
+| `NotFoundError` | the conversation, edge, concept, or link doesn't exist | 404 | `LookupError` |
+| `InvalidInputError` | the request breaks a domain rule | 422 | `ValueError` |
+| `ProviderError` | the model provider failed, is unreachable, or isn't configured | 502 | `RuntimeError` |
+| `ConflictError` | a write collides with an existing record (a duplicate import) | 409 | |
+| `NotConfiguredError` | a service ran before `init()` | | `RuntimeError` |
+
+All derive from `ConversationTreeError`. Provider calls translate `httpx`
+errors into `ProviderError`, so callers never depend on the HTTP client.
+`streamChatMessage` validates when it is *called* and raises before returning
+its iterator, so a caller can still reject a bad request before streaming;
+`ProviderError` surfaces while iterating.
+
 What stays in `api.py` on purpose: request-shape limits (field lengths, message
 counts) on the Pydantic models, the report's `format` and download filename, and
 the auth/CORS middleware.
+
+### Things To Know
+
+- **Everything is synchronous.** Classifying a turn takes a second or two on
+  CPU, so an async host should call these functions from a worker thread
+  (`asyncio.to_thread`). The first classification loads two models; call
+  `warmup()` at start-up to pay that cost early.
+- **One configuration per process.** `init()` sets module-level state, so a
+  process works against one database at a time. Calling it again switches
+  databases and clears the caches; it is meant for start-up and tests.
+- **SQLite is the store.** `db.py` is the only module that imports `sqlite3`
+  (`vectorStore.py` reads embeddings through it for the optional pgvector
+  mirror). There is no storage interface yet; see Future Work.
+- **History is the timeline.** A reply is sent the conversation in the order it
+  happened, not just the semantic thread the new message belongs to.
 
 ## Persistence Model
 
@@ -440,8 +502,9 @@ is ignored by Git; the old root-level `conversationTree.db` is retained only
 as a legacy sample database.
 
 - `conversations` — `model` column holds the conversation's default response
-  model (`stub`, `ollama:<name>`, or `openai:<name>`); null means use the
-  environment default. Imported chats also carry `source` (`chatgpt` /
+  model (`stub`, or `provider:model` such as `ollama:<name>`,
+  `openai:<name>`, `anthropic:<name>`, `gemini:<name>`); null means use the
+  replier's default. Imported chats also carry `source` (`chatgpt` /
   `claude` / `gemini` / `other`), `externalId` (the origin system's own
   conversation id), and `sourceUrl`; `(source, externalId)` is unique, which is
   how a re-sync finds its conversation
@@ -476,6 +539,11 @@ deliberate, as it is what keeps other workers from serving stale state.
 - `GET /models` — installed `Ollama` tags (queried live from `/api/tags`), the
   configured `OpenAI` model, and `stub`, plus the current default and whether
   `Ollama` is reachable
+- `GET /ollama/library` — a short curated list of Ollama models that are not
+  installed yet, and whether Ollama is reachable
+- `POST /ollama/pull` — `{"model": "<name>"}`; streams Ollama's pull progress as
+  `text/event-stream`. A failure arrives as a
+  `{"status": "error", "message": "..."}` event, not an HTTP error
 
 ### Conversation Endpoints
 
@@ -484,15 +552,17 @@ deliberate, as it is what keeps other workers from serving stale state.
   chat was imported (null otherwise)
 - `GET /conversations/{conversationId}`
 - `PATCH /conversations/{conversationId}` — set the conversation's default
-  response model (`{"model": "ollama:<name>"}`); validated against the same
-  `stub` / `ollama:<name>` / `openai:<name>` shape
+  response model (`{"model": "ollama:<name>"}`); validated by the installed
+  replier (the built-in one accepts `stub` and `ollama:` / `openai:` /
+  `anthropic:` / `gemini:` specs)
 - `DELETE /conversations/{conversationId}`
 
 ### Turn Endpoints
 
 - `POST /conversations/{conversationId}/turns` — optional `model` overrides the
-  provider for this turn and becomes the conversation's new default; a provider
-  failure returns `502`. If this is the conversation's first turn and it has no
+  provider for this turn and becomes the conversation's new default; the model is
+  sent the conversation so far (the earlier turns that fit the context window),
+  not just the new message; a provider failure returns `502`. If this is the conversation's first turn and it has no
   title yet, the title becomes the user message (collapsed, trimmed to 60 chars
   on a word boundary) — a title given at creation (`POST /conversations`) is
   never overwritten
@@ -504,9 +574,10 @@ deliberate, as it is what keeps other workers from serving stale state.
   the same payload the blocking endpoint returns. A provider or persistence
   failure arrives as `{"type": "error", "message": "..."}` instead of an HTTP
   error status — by the time that can happen the response has already started
-  with `200`, so there's no status left to change. `Ollama` and the stub
-  stream incremental chunks; Gemini currently sends its whole reply as one
-  `delta`
+  with `200`, so there's no status left to change. A missing conversation or an
+  invalid model is still a real `404` / `422`, because those are checked before
+  streaming starts. `Ollama`, `OpenAI`, `Anthropic`, and the stub stream
+  incremental chunks; Gemini currently sends its whole reply as one `delta`
 - `GET /conversations/{conversationId}/turns`
 
 ### Ingest Endpoint
@@ -570,6 +641,13 @@ deliberate, as it is what keeps other workers from serving stale state.
 `continuation` / `branch` / `related`, and that `confidence` is in `[0, 1]`.
 Hand-created edges are marked `origin: "manual"` and are preserved when a
 conversation is re-analyzed; classifier edges (`origin: "auto"`) are rebuilt.
+
+### Viewer And Health Endpoints
+
+- `GET /` — an index of the endpoints (public)
+- `GET /ui` — the built viewer; `503` with the build steps if `frontend/dist`
+  does not exist
+- `GET /healthz` — liveness check (public)
 
 ### Debug Endpoint
 
@@ -731,6 +809,10 @@ working example client.
 - If the stored history *disagrees* with what arrives (an edited prompt, a
   regenerated answer), the conversation is rebuilt from the incoming history
   rather than guessing which turns survive; the response says `rebuilt: true`.
+  A rebuild is all-or-nothing: the new history is classified first, off to the
+  side, and then swapped in by one transaction, so a failure part-way leaves the
+  previous history untouched. Appending new turns saves them one at a time, so a
+  failure there keeps the turns already saved and the next sync continues.
 - Imported turns go through the same classifier, concept assignment, and
   cross-chat linking as typed ones, so they show up in the graph, the map,
   search, and context-health immediately. Classifying on CPU takes roughly a
@@ -775,7 +857,7 @@ model attends to well, not a measurement of any particular model, and these
 signals indicate *risk*, not proof — a repeated question can be deliberate.
 
 The same window decides how much earlier conversation the built-in model
-providers are sent with each new message (see "Using The Services Directly"),
+providers are sent with each new message (see "Using It As A Library"),
 so the horizon marks where a model actually stops seeing the chat.
 
 ## Hosted Deployment
@@ -818,13 +900,8 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-To use the logic as a library instead (in another project or virtualenv):
-
-```bash
-pip install -e .            # core logic only: numpy, sentence-transformers, httpx
-pip install -e ".[server]"  # + the FastAPI layer and uvicorn
-pip install -e ".[pgvector]" # + PostgreSQL/pgvector retrieval
-```
+To use the logic as a library in another project instead, see
+"Using It As A Library".
 
 ### Optional pgvector acceleration
 
@@ -887,6 +964,15 @@ export OPENAI_API_KEY=your_key_here
 export OPENAI_MODEL=gpt-5-mini
 unset AI_CONVERSATION_TREE_STUB_LLM
 ```
+
+#### Anthropic and Gemini
+
+These are chosen per conversation rather than by default: pick or send an
+`anthropic:<model>` or `gemini:<model>` spec, and provide `ANTHROPIC_API_KEY` /
+`GEMINI_API_KEY` (or a key entered in the viewer's Settings, which is forwarded
+per request).
+
+A replier passed to `init(..., replier=...)` replaces all of the above.
 
 ### 4. Start the app
 
@@ -1002,7 +1088,7 @@ Automated tests (pytest; no network, models load from the local Hugging Face
 cache):
 
 ```bash
-venv/bin/pip install -r requirements-dev.txt
+venv/bin/pip install -r requirements-dev.txt   # or: pip install -e ".[dev]"
 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 venv/bin/python -m pytest
 ```
 
@@ -1011,7 +1097,13 @@ validation), context-health scoring, hybrid search, summaries (including
 provider failure), API-token auth and CORS (a 401 still carries CORS headers), and the conversation / turn / edge /
 report / concept-link endpoints, plus regressions for atomic turn writes, cache
 recovery after a failed write, concurrent first syncs, and stale pgvector rows.
-Each test runs against a throwaway database.
+For the library side it also checks, with no HTTP involved, that every service
+enforces its own rules and raises the documented exception; that settings,
+`init()`, and the lazy models behave (including a subprocess check that
+importing the package reads no environment, opens no database, and loads no
+model); `appendTurn`; the replier plug-in; which earlier turns a replier
+receives and how the context window trims them; and the exact request each
+built-in provider sends. Each test runs against a throwaway database.
 The classifier is graded separately by the eval scripts below.
 
 Lint (unused imports / names):
@@ -1066,6 +1158,16 @@ cd frontend && npm run build
   anything the model actually saw
 - ingestion classifies on the request thread, so a very long first sync can
   take a minute or more
+- the services are synchronous, and the package holds one configuration per
+  process (see "Things To Know")
+- SQLite is the only store, and there is no storage interface; the embedding
+  models are fixed rather than configurable
+- the history sent to a model is the whole timeline trimmed by a rough
+  characters-per-token estimate, not the semantic thread, and the exact token
+  count of a given model will differ
+- the history payloads for OpenAI, Anthropic, and Gemini follow each provider's
+  documented format and are tested against the request shapes, but have not been
+  exercised against the live APIs
 
 ## Future Work
 
@@ -1081,6 +1183,19 @@ Next:
   contradicts an earlier answer (needs a model or NLI pass)
 - summaries that cover each thread rather than the whole chat
 - search filters by source and date
+
+### Host Integration
+
+Next:
+
+- a storage interface in front of `db.py`, so a host can keep conversations in
+  its own database
+- one public module that re-exports the host-facing functions, so callers need
+  not know which service each lives in
+- an injectable embedding model (and a matching pgvector dimension), instead of
+  the fixed MiniLM pair
+- thread-aware history, sending the semantic thread a message belongs to rather
+  than the whole timeline
 
 ### Postgres + pgvector
 
