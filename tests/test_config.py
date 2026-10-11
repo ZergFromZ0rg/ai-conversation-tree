@@ -4,13 +4,15 @@ import asyncio
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 import conversation_tree
-from conversation_tree import Settings, api, config, db, graphService, graphStore, vectorStore
+from conversation_tree import Settings, analysisService, api, conceptIndex, config, db, graphService, graphStore, vectorStore
 from conversation_tree.conversationErrors import ConversationTreeError, NotConfiguredError
+from conversation_tree.chatService import appendTurn, createConversationSession
 from conversation_tree.contextService import buildContextHealth
 from conversation_tree.ingestService import ingestConversation
 from conftest import chat
@@ -85,9 +87,15 @@ def test_init_drops_state_that_belonged_to_the_previous_settings(reconfigurable,
         pass  # leaves the loaded graph in the cache
     assert graphStore._cache
     vectorStore._schemaReady = True
+    conceptIndex._lastRelink[conversationId] = time.monotonic()
+    analysisService._summaryCache[(conversationId, 1, 0, "m", 0)] = {"summary": "written for the old database"}
+
     conversation_tree.init(Settings(dbPath=tmp_path / "other.db"))
+
     assert graphStore._cache == {}
     assert vectorStore._schemaReady is False
+    assert conceptIndex._lastRelink == {}
+    assert analysisService._summaryCache == {}
 
 
 def test_the_context_window_comes_from_settings(reconfigurable, tmp_path):
@@ -149,3 +157,18 @@ def test_importing_the_package_reads_no_config_opens_no_database_and_loads_no_mo
     )
     assert result.returncode == 0, result.stderr
     assert not marker.exists()
+
+
+def test_a_new_database_is_not_debounced_by_the_old_ones_relink_times(reconfigurable, tmp_path, monkeypatch):
+    conversation_tree.init(Settings(dbPath=tmp_path / "first.db"))
+    conversationId = createConversationSession()["conversationId"]
+    appendTurn(conversationId, "What are cats?", "Small mammals.")
+    assert conversationId in conceptIndex._lastRelink, "the turn recorded when this conversation was relinked"
+
+    conversation_tree.init(Settings(dbPath=tmp_path / "second.db"))
+    relinked = []
+    monkeypatch.setattr(conceptIndex, "relinkConversation", lambda cid: relinked.append(cid) or 0)
+    sameId = createConversationSession()["conversationId"]
+    assert sameId == conversationId, "a fresh database hands out the same ids again"
+    appendTurn(sameId, "What do cats eat?", "Meat.")
+    assert relinked == [sameId], "the relink must not be skipped as 'just done' by the other database's timestamp"

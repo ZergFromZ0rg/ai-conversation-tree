@@ -229,6 +229,12 @@ def buildLlmSummary(conversationId: int, model: str | None = None, apiKey: str |
     return result
 
 
+def reset() -> None:
+    """Drop cached model-written summaries (keyed by conversation id, which means
+    nothing in a different database); called by init() when the settings change."""
+    _summaryCache.clear()
+
+
 def buildConversationReport(conversationId: int) -> dict:
     conversation = getConversation(conversationId)
     if conversation is None:

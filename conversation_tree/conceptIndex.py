@@ -380,6 +380,13 @@ def maybeRelinkConcepts(conversationId: int, force: bool = False) -> None:
         logger.exception("concept relink failed for conversation %s", conversationId)
 
 
+def reset() -> None:
+    """Forget when each conversation was last relinked (the timestamps are keyed
+    by conversation id, which means nothing in a different database); called by
+    init() when the settings change."""
+    _lastRelink.clear()
+
+
 def forgetConversation(conversationId: int) -> None:
     """Drop debounce state for a deleted conversation (its links cascade in SQL)."""
     _lastRelink.pop(conversationId, None)

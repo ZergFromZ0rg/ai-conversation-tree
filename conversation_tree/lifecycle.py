@@ -17,13 +17,15 @@ def init(settings: Settings | None = None, *, replier=None) -> Settings:
     built-in, environment-driven providers. A host that supplies replies
     itself (``appendTurn``) needs none.
     """
-    from . import db, graphStore, providers, vectorStore
+    from . import analysisService, conceptIndex, db, graphStore, providers, vectorStore
 
     settings = settings or Settings.fromEnv()
     configure(settings)
     providers.setReplier(replier)
     graphStore.clear()
     vectorStore.reset()
+    conceptIndex.reset()
+    analysisService.reset()
     db.initDb()
     return settings
 

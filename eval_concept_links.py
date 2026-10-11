@@ -33,7 +33,6 @@ def buildConversation(title, messages):
 def runCase(name, conversations, expectedPairs, expectedKind=None):
     dbPath = Path(tempfile.gettempdir()) / f"eval_concept_links_{uuid.uuid4().hex}.db"
     conversation_tree.init(Settings(dbPath=dbPath))
-    conceptIndex._lastRelink.clear()
 
     titleById = {}
     for title, messages in conversations:
