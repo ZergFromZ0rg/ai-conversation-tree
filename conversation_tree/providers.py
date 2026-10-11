@@ -12,6 +12,7 @@ import inspect
 import json
 import os
 import time
+from dataclasses import dataclass, field
 from typing import Callable, Iterator
 
 import httpx
@@ -19,6 +20,33 @@ import httpx
 from .conversationErrors import InvalidInputError, ProviderError
 
 STUB_MODEL_SPEC = "stub"
+
+
+def _chatMessages(userText: str, history) -> list[dict]:
+    """Earlier turns plus the new message, in the {"role", "content"} shape Ollama and Anthropic take."""
+    return [
+        *({"role": message["role"], "content": message["content"]} for message in history),
+        {"role": "user", "content": userText},
+    ]
+
+
+def _openAiInput(userText: str, history) -> list[dict]:
+    """The Responses API `input`: earlier turns as plain-text messages, then the new one."""
+    return [
+        *({"role": message["role"], "content": message["content"]} for message in history),
+        {"role": "user", "content": [{"type": "input_text", "text": userText}]},
+    ]
+
+
+def _geminiContents(userText: str, history) -> list[dict]:
+    """Gemini calls the assistant role "model"."""
+    return [
+        *(
+            {"role": "model" if message["role"] == "assistant" else "user", "parts": [{"text": message["content"]}]}
+            for message in history
+        ),
+        {"role": "user", "parts": [{"text": userText}]},
+    ]
 
 MODEL_SPEC_HINT = "model must be 'stub', 'ollama:<name>', 'openai:<name>', 'anthropic:<name>', or 'gemini:<name>'."
 
@@ -88,12 +116,12 @@ def ollamaBaseUrl() -> str:
     return os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 
 
-def generateOllamaText(userText: str, model: str) -> str:
+def generateOllamaText(userText: str, model: str, history=()) -> str:
     response = httpx.post(
         f"{ollamaBaseUrl()}/api/chat",
         json={
             "model": model,
-            "messages": [{"role": "user", "content": userText}],
+            "messages": _chatMessages(userText, history),
             "stream": False,
         },
         timeout=60.0,
@@ -105,7 +133,7 @@ def generateOllamaText(userText: str, model: str) -> str:
     return aiText
 
 
-def generateOpenAiText(userText: str, model: str, apiKey: str | None = None) -> str:
+def generateOpenAiText(userText: str, model: str, apiKey: str | None = None, history=()) -> str:
     apiKey = apiKey or os.environ.get("OPENAI_API_KEY")
     if not apiKey:
         raise ProviderError("OPENAI_API_KEY is not set.")
@@ -117,12 +145,7 @@ def generateOpenAiText(userText: str, model: str, apiKey: str | None = None) -> 
         },
         json={
             "model": model,
-            "input": [
-                {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": userText}],
-                }
-            ],
+            "input": _openAiInput(userText, history),
         },
         timeout=60.0,
     )
@@ -133,7 +156,7 @@ def generateOpenAiText(userText: str, model: str, apiKey: str | None = None) -> 
     return aiText
 
 
-def generateOpenAiTextStream(userText: str, model: str, apiKey: str | None = None):
+def generateOpenAiTextStream(userText: str, model: str, apiKey: str | None = None, history=()):
     """Yield text deltas from the OpenAI Responses SSE stream."""
     apiKey = apiKey or os.environ.get("OPENAI_API_KEY")
     if not apiKey:
@@ -148,7 +171,7 @@ def generateOpenAiTextStream(userText: str, model: str, apiKey: str | None = Non
         },
         json={
             "model": model,
-            "input": [{"role": "user", "content": [{"type": "input_text", "text": userText}]}],
+            "input": _openAiInput(userText, history),
             "stream": True,
         },
         timeout=60.0,
@@ -177,7 +200,7 @@ def extractAnthropicText(responseBody: dict) -> str:
     ).strip()
 
 
-def generateAnthropicText(userText: str, model: str, apiKey: str | None = None) -> str:
+def generateAnthropicText(userText: str, model: str, apiKey: str | None = None, history=()) -> str:
     apiKey = apiKey or os.environ.get("ANTHROPIC_API_KEY")
     if not apiKey:
         raise ProviderError("ANTHROPIC_API_KEY is not set.")
@@ -191,7 +214,7 @@ def generateAnthropicText(userText: str, model: str, apiKey: str | None = None) 
         json={
             "model": model,
             "max_tokens": 1024,
-            "messages": [{"role": "user", "content": userText}],
+            "messages": _chatMessages(userText, history),
         },
         timeout=60.0,
     )
@@ -210,14 +233,14 @@ def extractGeminiText(responseBody: dict) -> str:
     return "\n".join(part.get("text", "") for part in parts).strip()
 
 
-def generateGeminiText(userText: str, model: str, apiKey: str | None = None) -> str:
+def generateGeminiText(userText: str, model: str, apiKey: str | None = None, history=()) -> str:
     apiKey = apiKey or os.environ.get("GEMINI_API_KEY")
     if not apiKey:
         raise ProviderError("GEMINI_API_KEY is not set.")
     response = httpx.post(
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         params={"key": apiKey},
-        json={"contents": [{"parts": [{"text": userText}]}]},
+        json={"contents": _geminiContents(userText, history)},
         timeout=60.0,
     )
     response.raise_for_status()
@@ -240,7 +263,8 @@ def envDefaultModelSpec() -> str:
 
 
 @_translatesTransportErrors
-def generateAiText(userText: str, modelSpec: str | None = None, apiKey: str | None = None) -> str:
+def generateAiText(userText: str, modelSpec: str | None = None, apiKey: str | None = None, history=()) -> str:
+    """One reply. `history` is the earlier turns as [{"role", "content"}, ...] (the stub ignores it)."""
     provider, model = parseModelSpec(modelSpec or envDefaultModelSpec())
 
     if provider == "stub":
@@ -248,17 +272,17 @@ def generateAiText(userText: str, modelSpec: str | None = None, apiKey: str | No
     if provider == "ollama":
         if not model:
             raise ProviderError("An ollama model spec needs a model name, e.g. 'ollama:llama3'.")
-        return generateOllamaText(userText, model)
+        return generateOllamaText(userText, model, history)
     if provider == "openai":
-        return generateOpenAiText(userText, model or os.environ.get("OPENAI_MODEL", "gpt-5-mini"), apiKey)
+        return generateOpenAiText(userText, model or os.environ.get("OPENAI_MODEL", "gpt-5-mini"), apiKey, history)
     if provider == "anthropic":
         if not model:
             raise ProviderError("An anthropic model spec needs a model name, e.g. 'anthropic:claude-sonnet-5'.")
-        return generateAnthropicText(userText, model, apiKey)
+        return generateAnthropicText(userText, model, apiKey, history)
     if provider == "gemini":
         if not model:
             raise ProviderError("A gemini model spec needs a model name, e.g. 'gemini:gemini-2.5-flash'.")
-        return generateGeminiText(userText, model, apiKey)
+        return generateGeminiText(userText, model, apiKey, history)
     raise ProviderError(f"Unknown model provider: {provider!r}. Expected one of {list(KNOWN_PROVIDERS)}.")
 
 
@@ -283,13 +307,13 @@ def _streamStubText(userText: str):
         yield chunk
 
 
-def generateOllamaTextStream(userText: str, model: str):
+def generateOllamaTextStream(userText: str, model: str, history=()):
     with httpx.stream(
         "POST",
         f"{ollamaBaseUrl()}/api/chat",
         json={
             "model": model,
-            "messages": [{"role": "user", "content": userText}],
+            "messages": _chatMessages(userText, history),
             "stream": True,
         },
         timeout=60.0,
@@ -306,7 +330,7 @@ def generateOllamaTextStream(userText: str, model: str):
                 break
 
 
-def generateAnthropicTextStream(userText: str, model: str, apiKey: str | None = None):
+def generateAnthropicTextStream(userText: str, model: str, apiKey: str | None = None, history=()):
     apiKey = apiKey or os.environ.get("ANTHROPIC_API_KEY")
     if not apiKey:
         raise ProviderError("ANTHROPIC_API_KEY is not set.")
@@ -321,7 +345,7 @@ def generateAnthropicTextStream(userText: str, model: str, apiKey: str | None = 
         json={
             "model": model,
             "max_tokens": 1024,
-            "messages": [{"role": "user", "content": userText}],
+            "messages": _chatMessages(userText, history),
             "stream": True,
         },
         timeout=60.0,
@@ -338,7 +362,7 @@ def generateAnthropicTextStream(userText: str, model: str, apiKey: str | None = 
 
 
 @_translatesTransportErrors
-def streamAiText(userText: str, modelSpec: str | None = None, apiKey: str | None = None):
+def streamAiText(userText: str, modelSpec: str | None = None, apiKey: str | None = None, history=()):
     """Yield a reply as it's generated. Same provider routing as generateAiText.
 
     Gemini's `streamGenerateContent` (a JSON array, not line-delimited) still
@@ -353,22 +377,22 @@ def streamAiText(userText: str, modelSpec: str | None = None, apiKey: str | None
     if provider == "ollama":
         if not model:
             raise ProviderError("An ollama model spec needs a model name, e.g. 'ollama:llama3'.")
-        yield from generateOllamaTextStream(userText, model)
+        yield from generateOllamaTextStream(userText, model, history)
         return
     if provider == "openai":
         yield from generateOpenAiTextStream(
-            userText, model or os.environ.get("OPENAI_MODEL", "gpt-5-mini"), apiKey
+            userText, model or os.environ.get("OPENAI_MODEL", "gpt-5-mini"), apiKey, history
         )
         return
     if provider == "anthropic":
         if not model:
             raise ProviderError("An anthropic model spec needs a model name, e.g. 'anthropic:claude-sonnet-5'.")
-        yield from generateAnthropicTextStream(userText, model, apiKey)
+        yield from generateAnthropicTextStream(userText, model, apiKey, history)
         return
     if provider == "gemini":
         if not model:
             raise ProviderError("A gemini model spec needs a model name, e.g. 'gemini:gemini-2.5-flash'.")
-        yield generateGeminiText(userText, model, apiKey)
+        yield generateGeminiText(userText, model, apiKey, history)
         return
     raise ProviderError(f"Unknown model provider: {provider!r}. Expected one of {list(KNOWN_PROVIDERS)}.")
 
@@ -473,6 +497,35 @@ def isValidModelSpec(modelSpec: str) -> bool:
 
 # ---- pluggable replies ----
 
+@dataclass(frozen=True)
+class ReplyRequest:
+    """Everything a replier is told about the reply it is asked for.
+
+    One object, so a field can be added later without changing every replier's
+    signature.
+    """
+
+    userText: str
+    """The new message to answer."""
+
+    modelSpec: str | None = None
+    """The model the request or the conversation chose; None means the replier's default."""
+
+    apiKey: str | None = None
+    """A per-request provider key, when the caller supplied one."""
+
+    conversationId: int | None = None
+    """The conversation this message belongs to, or None for a request that isn't
+    a turn in one (a summary)."""
+
+    history: list[dict] = field(default_factory=list)
+    """The turns before this message, oldest first, as ``{"role": "user" | "assistant",
+    "content": str}``. Only turns that fit the context window (see
+    ``Settings.contextWindowTokens``) are included, and always whole turns, so the
+    list alternates user / assistant and starts with a user message. Empty for the
+    first turn, and for requests that aren't a turn in a conversation."""
+
+
 class Replier:
     """How the package obtains a reply for a user message.
 
@@ -482,18 +535,19 @@ class Replier:
     provider failed" (an HTTP layer reports those as 502); anything else is
     treated as a bug and propagates.
 
-    Only the latest message is passed, not the conversation history; a replier
-    that needs history can look it up by conversation itself.
+    The request carries the conversation's earlier turns (``request.history``)
+    and its id (``request.conversationId``): use the history as given, or ignore
+    it and look the conversation up in the host's own store.
     """
 
     modelSpecHint = "model must be a non-empty model name."
 
-    def generate(self, userText: str, modelSpec: str | None = None, apiKey: str | None = None) -> str:
+    def generate(self, request: ReplyRequest) -> str:
         raise NotImplementedError
 
-    def stream(self, userText: str, modelSpec: str | None = None, apiKey: str | None = None) -> Iterator[str]:
+    def stream(self, request: ReplyRequest) -> Iterator[str]:
         """Yield the reply in pieces. By default the whole reply is one piece."""
-        yield self.generate(userText, modelSpec, apiKey)
+        yield self.generate(request)
 
     def isValidModelSpec(self, modelSpec: str) -> bool:
         return bool(modelSpec.strip())
@@ -508,11 +562,11 @@ class BuiltinReplier(Replier):
 
     modelSpecHint = MODEL_SPEC_HINT
 
-    def generate(self, userText, modelSpec=None, apiKey=None):
-        return generateAiText(userText, modelSpec, apiKey)
+    def generate(self, request):
+        return generateAiText(request.userText, request.modelSpec, request.apiKey, request.history)
 
-    def stream(self, userText, modelSpec=None, apiKey=None):
-        return streamAiText(userText, modelSpec, apiKey)
+    def stream(self, request):
+        return streamAiText(request.userText, request.modelSpec, request.apiKey, request.history)
 
     def isValidModelSpec(self, modelSpec):
         return isValidModelSpec(modelSpec)
@@ -522,18 +576,18 @@ class BuiltinReplier(Replier):
 
 
 class CallableReplier(Replier):
-    """Adapts a plain ``function(userText, modelSpec, apiKey) -> str``.
+    """Adapts a plain ``function(request) -> str``.
 
     Any exception the function raises is reported as a ProviderError, since a
     failing model call is a provider failure by definition.
     """
 
-    def __init__(self, function: Callable[[str, str | None, str | None], str]):
+    def __init__(self, function: Callable[[ReplyRequest], str]):
         self._function = function
 
-    def generate(self, userText, modelSpec=None, apiKey=None):
+    def generate(self, request):
         try:
-            return self._function(userText, modelSpec, apiKey)
+            return self._function(request)
         except ProviderError:
             raise
         except Exception as error:
@@ -551,7 +605,7 @@ def setReplier(replier: "Replier | Callable | None") -> Replier:
         replier = BuiltinReplier()
     elif not isinstance(replier, Replier):
         if not callable(replier):
-            raise TypeError("replier must be a Replier, a callable(userText, modelSpec, apiKey) -> str, or None")
+            raise TypeError("replier must be a Replier, a callable(ReplyRequest) -> str, or None")
         replier = CallableReplier(replier)
     _replier = replier
     return replier

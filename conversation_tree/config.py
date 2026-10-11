@@ -24,7 +24,9 @@ class Settings:
     """The SQLite file. Its directory is created on init."""
 
     contextWindowTokens: int = DEFAULT_CONTEXT_WINDOW_TOKENS
-    """Assumed size of the span a model attends to well (context-loss detection)."""
+    """Assumed size of the span a model attends to well. Context-loss detection
+    measures against it, and it caps how much earlier conversation is sent with
+    each new message."""
 
     pgvectorUrl: str | None = None
     """PostgreSQL URL for pgvector retrieval. ``None`` keeps retrieval local (NumPy)."""

@@ -8,6 +8,7 @@ import conversation_tree
 from conversation_tree import Settings, api, providers
 from conversation_tree.analysisService import buildLlmSummary
 from conversation_tree.chatService import (
+    appendTurn,
     createConversationSession,
     getConversationSession,
     processChatMessage,
@@ -28,9 +29,9 @@ def conversationId(client):
 def test_a_plain_function_produces_the_replies(conversationId):
     seen = []
 
-    def reply(userText, modelSpec, apiKey):
-        seen.append((userText, modelSpec, apiKey))
-        return f"echo: {userText}"
+    def reply(request):
+        seen.append((request.userText, request.modelSpec, request.apiKey))
+        return f"echo: {request.userText}"
 
     providers.setReplier(reply)
     result = processChatMessage(conversationId, "hello", "my-model", "secret")
@@ -44,13 +45,13 @@ def test_a_plain_function_produces_the_replies(conversationId):
 
 def test_with_no_model_anywhere_the_function_receives_none(conversationId):
     seen = []
-    providers.setReplier(lambda text, spec, key: seen.append(spec) or "ok")
+    providers.setReplier(lambda request: seen.append(request.modelSpec) or "ok")
     processChatMessage(conversationId, "hello")
     assert seen == [None]
 
 
 def test_a_function_gets_streaming_for_free_as_one_chunk(conversationId):
-    providers.setReplier(lambda text, spec, key: "whole reply")
+    providers.setReplier(lambda request: "whole reply")
     events = list(streamChatMessage(conversationId, "hello"))
     assert [event["type"] for event in events] == ["delta", "done"]
     assert events[0]["text"] == "whole reply"
@@ -94,10 +95,10 @@ def test_a_failing_replier_is_a_502_over_http(client):
 class TwoModels(providers.Replier):
     modelSpecHint = "model must be 'fast' or 'smart'."
 
-    def generate(self, userText, modelSpec=None, apiKey=None):
-        return f"{modelSpec or 'fast'}: {userText}"
+    def generate(self, request):
+        return f"{request.modelSpec or 'fast'}: {request.userText}"
 
-    def stream(self, userText, modelSpec=None, apiKey=None):
+    def stream(self, request):
         yield from ("one ", "two ", "three")
 
     def isValidModelSpec(self, modelSpec):
@@ -126,13 +127,15 @@ def test_model_validation_belongs_to_the_installed_replier(client):
 
 
 def test_the_summary_uses_the_replier_and_its_default_model(client):
-    prompts = []
-    providers.setReplier(lambda prompt, spec, key: prompts.append((prompt, spec)) or "A short summary.")
+    requests = []
+    providers.setReplier(lambda request: requests.append(request) or "A short summary.")
     conversationId = ingestConversation("other", "sum", chat(("What are cats?", "Small mammals.")))["conversationId"]
     summary = buildLlmSummary(conversationId)
     assert summary["mode"] == "llm" and summary["summary"] == "A short summary."
-    assert prompts[0][1] is None
-    providers.setReplier(lambda prompt, spec, key: "A different summary.")
+    assert requests[0].modelSpec is None
+    # A summary is not a turn in the conversation, and its prompt already holds the transcript.
+    assert requests[0].conversationId is None and requests[0].history == []
+    providers.setReplier(lambda request: "A different summary.")
     assert buildLlmSummary(conversationId)["summary"] == "A different summary.", "a new replier must not get the old one's cached text"
 
 
@@ -142,7 +145,7 @@ def test_setting_none_restores_the_builtin_providers():
     providers.setReplier(lambda *_args: "x")
     assert isinstance(providers.getReplier(), providers.CallableReplier)
     assert isinstance(providers.setReplier(None), providers.BuiltinReplier)
-    assert providers.getReplier().generate("hi") == "Stub LLM response for: hi"
+    assert providers.getReplier().generate(providers.ReplyRequest("hi")) == "Stub LLM response for: hi"
 
 
 def test_something_that_is_not_a_replier_is_rejected():
@@ -166,3 +169,74 @@ def test_the_app_installs_its_replier_at_startup(reconfigurable, tmp_path):
             return providers.getReplier()
 
     assert isinstance(asyncio.run(run()), TwoModels)
+
+
+# --- the conversation so far ------------------------------------------------
+
+def capturing():
+    requests = []
+
+    def reply(request):
+        requests.append(request)
+        return f"answer {len(requests)}"
+
+    return requests, reply
+
+
+def test_each_request_carries_the_conversation_so_far(conversationId):
+    requests, reply = capturing()
+    providers.setReplier(reply)
+    processChatMessage(conversationId, "What are cats?")
+    processChatMessage(conversationId, "What do they eat?")
+    processChatMessage(conversationId, "And dogs?")
+
+    assert [request.conversationId for request in requests] == [conversationId] * 3
+    assert [request.userText for request in requests] == ["What are cats?", "What do they eat?", "And dogs?"]
+    assert requests[0].history == []
+    assert requests[1].history == [
+        {"role": "user", "content": "What are cats?"},
+        {"role": "assistant", "content": "answer 1"},
+    ]
+    assert [message["content"] for message in requests[2].history] == [
+        "What are cats?", "answer 1", "What do they eat?", "answer 2",
+    ]
+    assert [message["role"] for message in requests[2].history] == ["user", "assistant"] * 2
+
+
+def test_streaming_requests_carry_the_history_too(conversationId):
+    requests, reply = capturing()
+    providers.setReplier(reply)
+    list(streamChatMessage(conversationId, "What are cats?"))
+    list(streamChatMessage(conversationId, "What do they eat?"))
+    assert requests[0].history == []
+    assert [message["content"] for message in requests[1].history] == ["What are cats?", "answer 1"]
+
+
+def test_turns_a_host_recorded_itself_are_part_of_the_history(conversationId):
+    requests, reply = capturing()
+    providers.setReplier(reply)
+    appendTurn(conversationId, "What are cats?", "Small mammals.")
+    processChatMessage(conversationId, "What do they eat?")
+    assert [message["content"] for message in requests[0].history] == ["What are cats?", "Small mammals."]
+
+
+def test_only_turns_that_fit_the_context_window_are_sent(reconfigurable, tmp_path):
+    # 400 characters is 100 tokens, so every turn below costs 200 tokens.
+    conversation_tree.init(Settings(dbPath=tmp_path / "window.db", contextWindowTokens=500))
+    conversationId = createConversationSession()["conversationId"]
+    for number in range(4):
+        appendTurn(conversationId, f"{number}" * 400, f"{number}" * 400)
+    requests, reply = capturing()
+    providers.setReplier(reply)
+    processChatMessage(conversationId, "hi")
+    # The two newest whole turns (2 and 3), nothing older: 400 of the 499 tokens left after "hi".
+    assert [message["content"][0] for message in requests[0].history] == ["2", "2", "3", "3"]
+
+
+def test_history_reaches_the_replier_over_http(client):
+    requests, reply = capturing()
+    providers.setReplier(reply)
+    conversationId = client.post("/conversations", json={}).json()["conversationId"]
+    client.post(f"/conversations/{conversationId}/turns", json={"userText": "What are cats?"})
+    client.post(f"/conversations/{conversationId}/turns", json={"userText": "What do they eat?"})
+    assert [message["content"] for message in requests[1].history] == ["What are cats?", "answer 1"]

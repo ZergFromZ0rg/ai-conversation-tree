@@ -15,7 +15,7 @@ from .db import (
     listConversationEdges,
 )
 from .graphService import encodeText
-from .providers import STUB_MODEL_SPEC, getReplier, requireValidModelSpec
+from .providers import STUB_MODEL_SPEC, ReplyRequest, getReplier, requireValidModelSpec
 from .vectorStore import searchWorkspace
 
 _wordPattern = re.compile(r"[a-z0-9][a-z0-9'_-]{1,}", re.IGNORECASE)
@@ -214,7 +214,10 @@ def buildLlmSummary(conversationId: int, model: str | None = None, apiKey: str |
         return cached
 
     try:
-        text = replier.generate(_summaryPrompt + _transcriptForSummary(turns), modelSpec, apiKey).strip()
+        # No conversationId and no history: the prompt already contains the transcript.
+        text = replier.generate(
+            ReplyRequest(_summaryPrompt + _transcriptForSummary(turns), modelSpec, apiKey)
+        ).strip()
     except Exception as error:  # provider errors vary widely; never fail the panel
         return {**base, "fallbackReason": f"Model call failed: {error}"}
     if not text:

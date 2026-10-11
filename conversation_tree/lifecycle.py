@@ -13,7 +13,7 @@ def init(settings: Settings | None = None, *, replier=None) -> Settings:
 
     ``replier`` is how replies are produced for ``processChatMessage`` and
     ``buildLlmSummary``: a ``providers.Replier``, a plain
-    ``function(userText, modelSpec, apiKey) -> str``, or ``None`` for the
+    ``function(request: ReplyRequest) -> str``, or ``None`` for the
     built-in, environment-driven providers. A host that supplies replies
     itself (``appendTurn``) needs none.
     """

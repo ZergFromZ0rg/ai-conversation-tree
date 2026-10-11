@@ -32,7 +32,9 @@ from .conceptIndex import (
 )
 from .graphService import addTurn, reclassifyTurns
 from .graphStore import invalidate, lockedGraph
-from .providers import getReplier, requireValidModelSpec
+from .contextService import recentHistory
+from .config import getSettings
+from .providers import ReplyRequest, getReplier, requireValidModelSpec
 
 EDGE_LABELS = ("continuation", "branch", "related")
 CONCEPT_LINK_KINDS = ("same", "related")
@@ -392,13 +394,22 @@ def _finalizeTurn(conversationId: int, userText: str, aiText: str) -> dict:
     return payload
 
 
+def _replyRequest(conversationId: int, userText: str, modelSpec: str | None, apiKey: str | None) -> ReplyRequest:
+    """The request for a reply to `userText`: the model, plus as much of the
+    conversation so far as fits the context window."""
+    history = recentHistory(
+        getConversationTurns(conversationId), userText, getSettings().contextWindowTokens
+    )
+    return ReplyRequest(userText, modelSpec, apiKey, conversationId, history)
+
+
 def processChatMessage(
     conversationId: int, userText: str, model: str | None = None, apiKey: str | None = None
 ) -> dict:
     modelSpec = _prepareTurn(conversationId, userText, model)
     # Generate the AI reply before taking the lock so the (potentially slow) LLM
     # call does not serialize other work on this conversation's graph.
-    aiText = getReplier().generate(userText, modelSpec, apiKey)
+    aiText = getReplier().generate(_replyRequest(conversationId, userText, modelSpec, apiKey))
     return _finalizeTurn(conversationId, userText, aiText)
 
 
@@ -417,12 +428,13 @@ def streamChatMessage(conversationId: int, userText: str, model: str | None = No
     failures (ProviderError) surface while iterating.
     """
     modelSpec = _prepareTurn(conversationId, userText, model)
-    return _streamTurnEvents(conversationId, userText, modelSpec, apiKey)
+    request = _replyRequest(conversationId, userText, modelSpec, apiKey)
+    return _streamTurnEvents(conversationId, userText, request)
 
 
-def _streamTurnEvents(conversationId: int, userText: str, modelSpec: str | None, apiKey: str | None):
+def _streamTurnEvents(conversationId: int, userText: str, request: ReplyRequest):
     chunks: list[str] = []
-    for chunk in getReplier().stream(userText, modelSpec, apiKey):
+    for chunk in getReplier().stream(request):
         chunks.append(chunk)
         yield {"type": "delta", "text": chunk}
 

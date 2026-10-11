@@ -282,7 +282,8 @@ cheap, the embedding models load when `graphService` is first imported):
   - turns imported role-tagged messages into turns, matches a chat to an
     earlier import, and classifies only what is new
 - `contextService.py`
-  - context-loss detection (pure scoring function plus a DB wrapper)
+  - context-loss detection (pure scoring function plus a DB wrapper), and
+    `recentHistory`, which picks the earlier turns that fit the context window
 - `db.py`
   - `SQLite` schema and helpers
 - `models.py`
@@ -332,7 +333,7 @@ does:
 | `Settings` field | Environment variable | Default from the environment |
 | --- | --- | --- |
 | `dbPath` | `AI_CONVERSATION_TREE_DB` | `.data/conversationTree.db` under the working directory |
-| `contextWindowTokens` | `AI_CONVERSATION_TREE_CONTEXT_TOKENS` | `8000` (also the default of a plain `Settings`) |
+| `contextWindowTokens` | `AI_CONVERSATION_TREE_CONTEXT_TOKENS` | `8000` (also the default of a plain `Settings`); measures context loss and caps the history sent with each message |
 | `pgvectorUrl` | `PGVECTOR_DATABASE_URL`, then `DATABASE_URL` | the local Compose database (a plain `Settings` leaves pgvector off) |
 
 The HTTP-only options (`AI_CONVERSATION_TREE_API_TOKEN`,
@@ -390,25 +391,41 @@ cross-chat concept links, exactly as a turn typed into the viewer would.
 
 **Plugging in your own model layer.** `processChatMessage`,
 `streamChatMessage`, and the model-written summary ask a *replier* for text.
-Pass a plain function, or subclass `providers.Replier` for streaming, model
-validation, and a default model:
+Pass a plain function of a `ReplyRequest`, or subclass `providers.Replier` for
+streaming, model validation, and a default model:
 
 ```python
-conversation_tree.init(settings, replier=lambda userText, modelSpec, apiKey: myLlm.chat(userText))
+conversation_tree.init(settings, replier=lambda request: myLlm.chat(request.history, request.userText))
 
 class MyReplier(providers.Replier):
     modelSpecHint = "model must be one of my models."
-    def generate(self, userText, modelSpec=None, apiKey=None): ...
-    def stream(self, userText, modelSpec=None, apiKey=None): ...   # optional
-    def isValidModelSpec(self, modelSpec): ...                     # optional
-    def defaultModelSpec(self): ...                                # optional
+    def generate(self, request): ...
+    def stream(self, request): ...            # optional
+    def isValidModelSpec(self, modelSpec): ...  # optional
+    def defaultModelSpec(self): ...           # optional
 ```
+
+A `ReplyRequest` carries `userText` (the new message), `modelSpec`, `apiKey`,
+`conversationId`, and `history`. It is one object so a field can be added later
+without changing every replier. `history` is the conversation so far, oldest
+first, as `{"role": "user" | "assistant", "content": "..."}`. Use it as given,
+or ignore it and look the conversation up by `conversationId` in your own store.
+Turns recorded with `appendTurn` count as history like any other.
+
+Only whole turns that fit the context window (`Settings.contextWindowTokens`,
+estimated at four characters per token) are included, newest first, after the
+new message has been charged against it. That is the same window the context
+health panel draws its horizon from, so a turn the panel marks as outside the
+window is also a turn the model is not sent. The first turn has an empty
+history. A summary request has none either, and `conversationId` is `None`,
+because its prompt already contains the transcript.
 
 An exception from a plain function is reported as `ProviderError`; a subclass
 should raise `ProviderError` itself for failures the caller ought to see as a
-provider problem, and anything else propagates as a bug. The replier receives
-only the latest message, not the conversation history. With no replier the
-built-in providers are used, so the bundled viewer is unchanged.
+provider problem, and anything else propagates as a bug. With no replier the
+built-in providers are used: they send `history` in each provider's own format
+(Ollama, OpenAI, Anthropic, and Gemini; the stub ignores it), so replies from a
+real model see the earlier conversation.
 
 What stays in `api.py` on purpose: request-shape limits (field lengths, message
 counts) on the Pydantic models, the report's `format` and download filename, and
@@ -756,6 +773,10 @@ The window defaults to 8,000 tokens and is set with
 `AI_CONVERSATION_TREE_CONTEXT_TOKENS`. It is an assumption about how much a
 model attends to well, not a measurement of any particular model, and these
 signals indicate *risk*, not proof — a repeated question can be deliberate.
+
+The same window decides how much earlier conversation the built-in model
+providers are sent with each new message (see "Using The Services Directly"),
+so the horizon marks where a model actually stops seeing the chat.
 
 ## Hosted Deployment
 

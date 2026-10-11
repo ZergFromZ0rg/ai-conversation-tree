@@ -1,6 +1,6 @@
 import numpy as np
 
-from conversation_tree.contextService import analyzeContextHealth, estimateTokens
+from conversation_tree.contextService import analyzeContextHealth, estimateTokens, recentHistory
 
 
 def unit(*values):
@@ -114,3 +114,51 @@ def test_context_health_endpoint(client):
     health = client.get(f"/conversations/{body['conversationId']}/context-health").json()
     assert any(item["turnId"] == 2 and item["signals"][0]["kind"] == "reask" for item in health["flaggedTurns"])
     assert client.get("/conversations/9999/context-health").status_code == 404
+
+
+# --- recentHistory: what a model is sent along with a new message ---------------
+
+def timelineTurn(label):
+    """A turn costing exactly 20 tokens (40 characters each way)."""
+    return {"userText": label * 40, "aiText": label.upper() * 40}
+
+
+def contents(messages):
+    return [message["content"][0] for message in messages]
+
+
+NEW = "x" * 8  # 2 tokens
+
+
+def test_history_is_chat_messages_oldest_first():
+    messages = recentHistory([timelineTurn("a"), timelineTurn("b")], NEW, windowTokens=1000)
+    assert [message["role"] for message in messages] == ["user", "assistant", "user", "assistant"]
+    assert contents(messages) == ["a", "A", "b", "B"]
+
+
+def test_the_oldest_turns_are_dropped_first():
+    turns = [timelineTurn(letter) for letter in "abcde"]
+    assert contents(recentHistory(turns, NEW, windowTokens=62)) == ["c", "C", "d", "D", "e", "E"]
+
+
+def test_a_turn_that_exactly_fits_is_kept():
+    turns = [timelineTurn(letter) for letter in "abc"]
+    assert len(recentHistory(turns, NEW, windowTokens=62)) == 6  # 3 turns = 60 tokens = the budget
+    assert len(recentHistory(turns, NEW, windowTokens=61)) == 4  # one token short drops the oldest whole turn
+
+
+def test_the_new_message_is_charged_against_the_window_first():
+    turns = [timelineTurn("a"), timelineTurn("b")]
+    assert contents(recentHistory(turns, NEW, windowTokens=22)) == ["b", "B"]
+    assert recentHistory(turns, NEW, windowTokens=21) == []
+    assert recentHistory(turns, "y" * 400, windowTokens=50) == [], "a message bigger than the window leaves no room"
+
+
+def test_history_is_contiguous_it_never_skips_a_big_turn_to_reach_older_ones():
+    big = {"userText": "B" * 800, "aiText": "B" * 800}
+    turns = [timelineTurn("a"), big, timelineTurn("c")]
+    assert contents(recentHistory(turns, NEW, windowTokens=100)) == ["c", "C"]
+
+
+def test_no_turns_means_no_history():
+    assert recentHistory([], NEW, windowTokens=1000) == []

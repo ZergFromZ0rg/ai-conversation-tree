@@ -26,8 +26,8 @@ def test_llm_summary_falls_back_on_the_stub_model(client):
 def test_llm_summary_uses_the_model_text_and_caches(client):
     calls = []
 
-    def fake(prompt, spec, key=None):
-        calls.append((prompt, spec))
+    def fake(request):
+        calls.append((request.userText, request.modelSpec))
         return "  The user asked about cats.  "
 
     providers.setReplier(fake)

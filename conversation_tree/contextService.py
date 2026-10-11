@@ -52,6 +52,38 @@ def estimateTokens(text: str) -> int:
     return max(1, len(text) // charsPerToken)
 
 
+def recentHistory(turns: list[dict], newUserText: str, windowTokens: int) -> list[dict]:
+    """The earlier turns to send a model along with a new message.
+
+    Returned as chat messages (``{"role": "user" | "assistant", "content": str}``),
+    oldest first. Whole turns only, taken from the newest backwards until the
+    window is full, so what a model is sent matches the horizon that
+    ``analyzeContextHealth`` draws (same token estimate). The new message is
+    charged against the window first. Stops at the first turn that doesn't fit
+    rather than skipping it, so the history is always contiguous.
+
+    `turns` are dicts with `userText` and `aiText` in timeline order.
+    """
+    budget = windowTokens - estimateTokens(newUserText)
+    kept: list[dict] = []
+    used = 0
+    for turn in reversed(turns):
+        cost = estimateTokens(turn["userText"]) + estimateTokens(turn["aiText"])
+        if used + cost > budget:
+            break
+        used += cost
+        kept.append(turn)
+    kept.reverse()
+    return [
+        message
+        for turn in kept
+        for message in (
+            {"role": "user", "content": turn["userText"]},
+            {"role": "assistant", "content": turn["aiText"]},
+        )
+    ]
+
+
 def _combine(weights: list[float]) -> float:
     remaining = 1.0
     for weight in weights:
