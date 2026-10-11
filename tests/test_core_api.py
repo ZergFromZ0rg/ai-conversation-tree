@@ -2,6 +2,11 @@
 
 import json
 
+import httpx
+import pytest
+
+import chatService
+
 
 def newConversation(client, title=None, model=None):
     body = {"title": title, "model": model}
@@ -162,3 +167,33 @@ def test_root_and_models_endpoints(client):
     assert "POST /ingest/conversations" in client.get("/").json()["endpoints"]
     models = client.get("/models").json()
     assert "stub" in [model["id"] for model in models["models"]]
+
+
+# --- error contract: domain exceptions map to status codes -----------------
+
+def test_provider_failure_is_a_502_and_a_stray_runtime_error_is_not(client, monkeypatch):
+    conversationId = newConversation(client)
+
+    def unreachable(*_args, **_kwargs):
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(chatService, "generateOllamaText", unreachable)
+    response = client.post(f"/conversations/{conversationId}/turns", json={"userText": "hi", "model": "ollama:tiny"})
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Model provider error: connection refused"
+
+    # An unrelated RuntimeError (a bug) must surface as itself, not as a "provider error".
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("classifier bug")
+
+    monkeypatch.setattr(chatService, "addTurn", broken)
+    with pytest.raises(RuntimeError, match="classifier bug"):
+        # Pinned to stub: the failed request above stored ollama:tiny as the conversation default.
+        client.post(f"/conversations/{conversationId}/turns", json={"userText": "hi", "model": "stub"})
+
+
+def test_streaming_a_bad_request_is_a_real_http_error_not_an_event(client):
+    conversationId = newConversation(client)
+    assert client.post("/conversations/9999/turns/stream", json={"userText": "hi"}).status_code == 404
+    bad = client.post(f"/conversations/{conversationId}/turns/stream", json={"userText": "hi", "model": "bogus"})
+    assert bad.status_code == 422

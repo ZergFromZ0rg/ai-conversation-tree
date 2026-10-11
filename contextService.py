@@ -21,6 +21,8 @@ import re
 
 import numpy as np
 
+from conversationErrors import NotFoundError
+
 # Rough size of the span a model is assumed to attend to well. Tokens are
 # estimated as chars / 4. Override per deployment for a larger/smaller model.
 defaultWindowTokens = int(os.environ.get("AI_CONVERSATION_TREE_CONTEXT_TOKENS", "8000"))
@@ -187,12 +189,12 @@ def analyzeContextHealth(
     }
 
 
-def buildContextHealth(conversationId: int, windowTokens: int | None = None) -> dict | None:
+def buildContextHealth(conversationId: int, windowTokens: int | None = None) -> dict:
     from db import getConversation, getConversationTurns, listConversationEdges
     from graphService import encodeText
 
     if getConversation(conversationId) is None:
-        return None
+        raise NotFoundError("Conversation not found.")
     turns = getConversationTurns(conversationId)
     edges = listConversationEdges(conversationId)
     if turns:

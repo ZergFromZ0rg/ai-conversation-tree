@@ -11,6 +11,7 @@ from datetime import datetime
 
 from chatService import _titleFromText, persistGraphTurn
 from conceptIndex import maybeRelinkConcepts
+from conversationErrors import InvalidInputError
 from db import (
     clearConversationTurns,
     createConversation,
@@ -89,10 +90,15 @@ def ingestConversation(
     Returns {conversationId, created, addedTurns, rebuilt, turnCount}.
     `rebuilt` is True when the stored history disagreed with the incoming one
     (an edited prompt or regenerated answer) and was replaced wholesale.
+
+    Raises InvalidInputError for an unknown `source` or when the messages
+    contain no complete user/assistant exchange.
     """
+    if source not in SOURCES:
+        raise InvalidInputError(f"source must be one of {list(SOURCES)}.")
     incoming = pairMessagesIntoTurns(messages)
     if not incoming:
-        raise ValueError("No complete user/assistant exchange found in the captured messages.")
+        raise InvalidInputError("No complete user/assistant exchange found in the captured messages.")
 
     cleanTitle = _normalize(title)[:200] if title else None
     existing = findConversationBySource(source, externalId)

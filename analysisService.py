@@ -6,6 +6,7 @@ import re
 
 import numpy as np
 
+from conversationErrors import InvalidInputError, NotFoundError
 from db import (
     getConversation,
     getConversationTurns,
@@ -41,10 +42,10 @@ def _topicTerms(turns: list[dict], limit: int = 8) -> list[str]:
     return [term for term, _ in counts.most_common(limit)]
 
 
-def buildConversationSummary(conversationId: int) -> dict | None:
+def buildConversationSummary(conversationId: int) -> dict:
     conversation = getConversation(conversationId)
     if conversation is None:
-        return None
+        raise NotFoundError("Conversation not found.")
     turns = getConversationTurns(conversationId)
     edges = listConversationEdges(conversationId)
     roots = [turn for turn in turns if turn["root"]]
@@ -90,6 +91,9 @@ def _snippet(text: str, terms: list[str], radius: int = 110) -> str:
     return ("…" if start > 0 else "") + collapsed[start:end].strip() + ("…" if end < len(collapsed) else "")
 
 
+MAX_SEARCH_LIMIT = 100
+
+
 def searchConversations(query: str, limit: int = 20, conversationId: int | None = None) -> dict:
     """Hybrid search across every stored turn.
 
@@ -99,10 +103,14 @@ def searchConversations(query: str, limit: int = 20, conversationId: int | None 
     whether the match was in the question or the answer, carries a snippet
     around the match, and its position in the conversation so the viewer can
     jump straight to the turn.
+
+    Raises InvalidInputError for a blank query or a limit outside 1..MAX_SEARCH_LIMIT.
     """
     query = query.strip()
     if not query:
-        return {"query": query, "results": []}
+        raise InvalidInputError("query must not be empty.")
+    if not 1 <= limit <= MAX_SEARCH_LIMIT:
+        raise InvalidInputError(f"limit must be between 1 and {MAX_SEARCH_LIMIT}.")
     queryTerms = list(dict.fromkeys(_terms(query)))
     embedding = encodeText(query)
     vectorRows = searchWorkspace(embedding, limit * 4 if conversationId is None else 100000)
@@ -179,17 +187,19 @@ def _transcriptForSummary(turns: list[dict]) -> str:
     return transcript
 
 
-def buildLlmSummary(conversationId: int, model: str | None = None, apiKey: str | None = None) -> dict | None:
+def buildLlmSummary(conversationId: int, model: str | None = None, apiKey: str | None = None) -> dict:
     """The structured summary with its prose replaced by a model-written one.
 
     Falls back to the local summary (mode "structured-local", with the reason)
     when the stub provider is selected or the provider fails, so the caller
-    always gets a usable summary.
+    always gets a usable summary. Raises InvalidInputError for a malformed
+    model spec and NotFoundError for an unknown conversation.
     """
-    from chatService import envDefaultModelSpec, generateAiText
+    from chatService import envDefaultModelSpec, generateAiText, requireValidModelSpec
 
+    requireValidModelSpec(model)
     base = buildConversationSummary(conversationId)
-    if base is None or base["turnCount"] == 0:
+    if base["turnCount"] == 0:
         return base
     conversation = getConversation(conversationId)
     modelSpec = model or (conversation or {}).get("model") or envDefaultModelSpec()
@@ -216,10 +226,10 @@ def buildLlmSummary(conversationId: int, model: str | None = None, apiKey: str |
     return result
 
 
-def buildConversationReport(conversationId: int) -> dict | None:
+def buildConversationReport(conversationId: int) -> dict:
     conversation = getConversation(conversationId)
     if conversation is None:
-        return None
+        raise NotFoundError("Conversation not found.")
     turns = getConversationTurns(conversationId)
     edges = listConversationEdges(conversationId)
     summary = buildConversationSummary(conversationId)

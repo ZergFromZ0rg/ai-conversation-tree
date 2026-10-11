@@ -249,7 +249,10 @@ Frontend:
 Backend:
 
 - `api.py`
-  - HTTP routes
+  - HTTP routes, auth, CORS, and the viewer shell. Holds no domain rules: it
+    maps the services' exceptions to status codes
+- `conversationErrors.py`
+  - the services' error contract (see "Using The Services Directly")
 - `chatService.py`
   - orchestration, provider calls, graph payload serialization
 - `graphService.py`
@@ -292,6 +295,30 @@ Frontend (`frontend/src/`):
   - `ConversationSidebar`, `ChatTranscript`, `Composer` (with the model picker),
     `GraphRail`, `GraphDrawer` (with the "also discussed elsewhere" panel),
     `TurnGraph`, `WorkspaceMap`
+
+### Using The Services Directly
+
+The HTTP layer is a thin skin. Every rule (label and confidence ranges, edge
+direction, model-spec format, search limits, import sources) is enforced inside
+the service functions, so a caller that is not FastAPI gets the same behaviour.
+Failures are signalled with three exceptions from `conversationErrors.py`,
+never with `None` / `False` returns or transport errors:
+
+| Exception | Meaning | HTTP | Also a |
+| --- | --- | --- | --- |
+| `NotFoundError` | the conversation, edge, concept, or link doesn't exist | 404 | `LookupError` |
+| `InvalidInputError` | the request breaks a domain rule | 422 | `ValueError` |
+| `ProviderError` | the model provider failed, is unreachable, or isn't configured | 502 | `RuntimeError` |
+
+All derive from `ConversationTreeError`. Provider calls translate `httpx`
+errors into `ProviderError`, so callers never depend on the HTTP client.
+`streamChatMessage` validates when it is *called* and raises before returning
+its iterator, so a caller can still reject a bad request before streaming;
+`ProviderError` surfaces while iterating.
+
+What stays in `api.py` on purpose: request-shape limits (field lengths, message
+counts) on the Pydantic models, the report's `format` and download filename, and
+the auth/CORS middleware.
 
 ## Persistence Model
 

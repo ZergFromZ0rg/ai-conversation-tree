@@ -1,9 +1,12 @@
 from datetime import datetime
+import functools
+import inspect
 import json
 import os
 import time
 import httpx
 
+from conversationErrors import InvalidInputError, NotFoundError, ProviderError
 from db import (
     applyReclassification,
     createEdge,
@@ -15,6 +18,7 @@ from db import (
     getAllConceptMembers,
     getConceptMembership,
     getConversation,
+    getConversationTurnIds,
     getConversationTurns,
     getEdge,
     listAllConceptLinks,
@@ -34,6 +38,35 @@ from conceptIndex import (
 )
 from graphService import addTurn, reclassifyTurns
 from graphStore import invalidate, lockedGraph
+
+EDGE_LABELS = ("continuation", "branch", "related")
+CONCEPT_LINK_KINDS = ("same", "related")
+MODEL_SPEC_HINT = "model must be 'stub', 'ollama:<name>', 'openai:<name>', 'anthropic:<name>', or 'gemini:<name>'."
+
+
+def _translatesTransportErrors(function):
+    """Raise ProviderError for any httpx failure inside `function`, so callers
+    never need to know which HTTP client the providers use. Works for plain
+    functions and for generators (errors that surface mid-stream)."""
+    if inspect.isgeneratorfunction(function):
+
+        @functools.wraps(function)
+        def streaming(*args, **kwargs):
+            try:
+                yield from function(*args, **kwargs)
+            except httpx.HTTPError as error:
+                raise ProviderError(str(error)) from error
+
+        return streaming
+
+    @functools.wraps(function)
+    def blocking(*args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except httpx.HTTPError as error:
+            raise ProviderError(str(error)) from error
+
+    return blocking
 
 
 def serializeGraphNode(nodeId: int, userText: str, aiText: str, conceptIds: list[int], root: bool, timelineParent: int | None) -> dict:
@@ -145,14 +178,14 @@ def generateOllamaText(userText: str, model: str) -> str:
     response.raise_for_status()
     aiText = extractOllamaText(response.json())
     if not aiText:
-        raise RuntimeError("Ollama returned no text output.")
+        raise ProviderError("Ollama returned no text output.")
     return aiText
 
 
 def generateOpenAiText(userText: str, model: str, apiKey: str | None = None) -> str:
     apiKey = apiKey or os.environ.get("OPENAI_API_KEY")
     if not apiKey:
-        raise RuntimeError("OPENAI_API_KEY is not set.")
+        raise ProviderError("OPENAI_API_KEY is not set.")
     response = httpx.post(
         "https://api.openai.com/v1/responses",
         headers={
@@ -173,7 +206,7 @@ def generateOpenAiText(userText: str, model: str, apiKey: str | None = None) -> 
     response.raise_for_status()
     aiText = extractResponseText(response.json())
     if not aiText:
-        raise RuntimeError("LLM returned no text output.")
+        raise ProviderError("LLM returned no text output.")
     return aiText
 
 
@@ -181,7 +214,7 @@ def generateOpenAiTextStream(userText: str, model: str, apiKey: str | None = Non
     """Yield text deltas from the OpenAI Responses SSE stream."""
     apiKey = apiKey or os.environ.get("OPENAI_API_KEY")
     if not apiKey:
-        raise RuntimeError("OPENAI_API_KEY is not set.")
+        raise ProviderError("OPENAI_API_KEY is not set.")
     with httpx.stream(
         "POST",
         "https://api.openai.com/v1/responses",
@@ -224,7 +257,7 @@ def extractAnthropicText(responseBody: dict) -> str:
 def generateAnthropicText(userText: str, model: str, apiKey: str | None = None) -> str:
     apiKey = apiKey or os.environ.get("ANTHROPIC_API_KEY")
     if not apiKey:
-        raise RuntimeError("ANTHROPIC_API_KEY is not set.")
+        raise ProviderError("ANTHROPIC_API_KEY is not set.")
     response = httpx.post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -242,7 +275,7 @@ def generateAnthropicText(userText: str, model: str, apiKey: str | None = None) 
     response.raise_for_status()
     aiText = extractAnthropicText(response.json())
     if not aiText:
-        raise RuntimeError("LLM returned no text output.")
+        raise ProviderError("LLM returned no text output.")
     return aiText
 
 
@@ -257,7 +290,7 @@ def extractGeminiText(responseBody: dict) -> str:
 def generateGeminiText(userText: str, model: str, apiKey: str | None = None) -> str:
     apiKey = apiKey or os.environ.get("GEMINI_API_KEY")
     if not apiKey:
-        raise RuntimeError("GEMINI_API_KEY is not set.")
+        raise ProviderError("GEMINI_API_KEY is not set.")
     response = httpx.post(
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         params={"key": apiKey},
@@ -267,7 +300,7 @@ def generateGeminiText(userText: str, model: str, apiKey: str | None = None) -> 
     response.raise_for_status()
     aiText = extractGeminiText(response.json())
     if not aiText:
-        raise RuntimeError("LLM returned no text output.")
+        raise ProviderError("LLM returned no text output.")
     return aiText
 
 
@@ -283,6 +316,7 @@ def envDefaultModelSpec() -> str:
     return "stub"
 
 
+@_translatesTransportErrors
 def generateAiText(userText: str, modelSpec: str | None = None, apiKey: str | None = None) -> str:
     provider, model = parseModelSpec(modelSpec or envDefaultModelSpec())
 
@@ -290,19 +324,19 @@ def generateAiText(userText: str, modelSpec: str | None = None, apiKey: str | No
         return f"Stub LLM response for: {userText}"
     if provider == "ollama":
         if not model:
-            raise RuntimeError("An ollama model spec needs a model name, e.g. 'ollama:llama3'.")
+            raise ProviderError("An ollama model spec needs a model name, e.g. 'ollama:llama3'.")
         return generateOllamaText(userText, model)
     if provider == "openai":
         return generateOpenAiText(userText, model or os.environ.get("OPENAI_MODEL", "gpt-5-mini"), apiKey)
     if provider == "anthropic":
         if not model:
-            raise RuntimeError("An anthropic model spec needs a model name, e.g. 'anthropic:claude-sonnet-5'.")
+            raise ProviderError("An anthropic model spec needs a model name, e.g. 'anthropic:claude-sonnet-5'.")
         return generateAnthropicText(userText, model, apiKey)
     if provider == "gemini":
         if not model:
-            raise RuntimeError("A gemini model spec needs a model name, e.g. 'gemini:gemini-2.5-flash'.")
+            raise ProviderError("A gemini model spec needs a model name, e.g. 'gemini:gemini-2.5-flash'.")
         return generateGeminiText(userText, model, apiKey)
-    raise RuntimeError(f"Unknown model provider: {provider!r}. Expected one of {list(KNOWN_PROVIDERS)}.")
+    raise ProviderError(f"Unknown model provider: {provider!r}. Expected one of {list(KNOWN_PROVIDERS)}.")
 
 
 # ---- streaming ----
@@ -352,7 +386,7 @@ def generateOllamaTextStream(userText: str, model: str):
 def generateAnthropicTextStream(userText: str, model: str, apiKey: str | None = None):
     apiKey = apiKey or os.environ.get("ANTHROPIC_API_KEY")
     if not apiKey:
-        raise RuntimeError("ANTHROPIC_API_KEY is not set.")
+        raise ProviderError("ANTHROPIC_API_KEY is not set.")
     with httpx.stream(
         "POST",
         "https://api.anthropic.com/v1/messages",
@@ -380,6 +414,7 @@ def generateAnthropicTextStream(userText: str, model: str, apiKey: str | None = 
                     yield text
 
 
+@_translatesTransportErrors
 def streamAiText(userText: str, modelSpec: str | None = None, apiKey: str | None = None):
     """Yield a reply as it's generated. Same provider routing as generateAiText.
 
@@ -394,7 +429,7 @@ def streamAiText(userText: str, modelSpec: str | None = None, apiKey: str | None
         return
     if provider == "ollama":
         if not model:
-            raise RuntimeError("An ollama model spec needs a model name, e.g. 'ollama:llama3'.")
+            raise ProviderError("An ollama model spec needs a model name, e.g. 'ollama:llama3'.")
         yield from generateOllamaTextStream(userText, model)
         return
     if provider == "openai":
@@ -404,15 +439,15 @@ def streamAiText(userText: str, modelSpec: str | None = None, apiKey: str | None
         return
     if provider == "anthropic":
         if not model:
-            raise RuntimeError("An anthropic model spec needs a model name, e.g. 'anthropic:claude-sonnet-5'.")
+            raise ProviderError("An anthropic model spec needs a model name, e.g. 'anthropic:claude-sonnet-5'.")
         yield from generateAnthropicTextStream(userText, model, apiKey)
         return
     if provider == "gemini":
         if not model:
-            raise RuntimeError("A gemini model spec needs a model name, e.g. 'gemini:gemini-2.5-flash'.")
+            raise ProviderError("A gemini model spec needs a model name, e.g. 'gemini:gemini-2.5-flash'.")
         yield generateGeminiText(userText, model, apiKey)
         return
-    raise RuntimeError(f"Unknown model provider: {provider!r}. Expected one of {list(KNOWN_PROVIDERS)}.")
+    raise ProviderError(f"Unknown model provider: {provider!r}. Expected one of {list(KNOWN_PROVIDERS)}.")
 
 
 # A small curated set of models worth offering as one-click downloads —
@@ -446,6 +481,7 @@ def listOllamaLibrary() -> dict:
     }
 
 
+@_translatesTransportErrors
 def pullOllamaModel(model: str):
     """Yield Ollama's own pull progress lines as {"status", "completed", "total"}
     dicts, straight through — Ollama already reports exactly what a progress
@@ -555,7 +591,21 @@ def persistGraphTurn(conversationId: int, turn) -> None:
     )
 
 
+def requireValidModelSpec(model: str | None) -> None:
+    """None means "use the default"; anything else must be a well-formed spec."""
+    if model is not None and not isValidModelSpec(model):
+        raise InvalidInputError(MODEL_SPEC_HINT)
+
+
+def _requireConversation(conversationId: int) -> dict:
+    conversation = getConversation(conversationId)
+    if conversation is None:
+        raise NotFoundError("Conversation not found.")
+    return conversation
+
+
 def createConversationSession(title: str | None = None, model: str | None = None) -> dict:
+    requireValidModelSpec(model)
     conversationId = createConversation(title)
     if model:
         setConversationModel(conversationId, model)
@@ -566,12 +616,16 @@ def listConversationSessions() -> dict:
     return {"conversations": listConversations()}
 
 
-def getConversationSession(conversationId: int) -> dict | None:
-    return getConversation(conversationId)
+def getConversationSession(conversationId: int) -> dict:
+    return _requireConversation(conversationId)
 
 
-def setConversationSessionModel(conversationId: int, model: str | None) -> dict | None:
-    return setConversationModel(conversationId, model)
+def setConversationSessionModel(conversationId: int, model: str | None) -> dict:
+    requireValidModelSpec(model)
+    conversation = setConversationModel(conversationId, model)
+    if conversation is None:
+        raise NotFoundError("Conversation not found.")
+    return conversation
 
 
 def loadConversationSession(conversationId: int) -> dict:
@@ -580,14 +634,16 @@ def loadConversationSession(conversationId: int) -> dict:
         return buildConversationPayload(conversationId)
 
 
-def deleteConversationSession(conversationId: int) -> bool:
+def deleteConversationSession(conversationId: int) -> None:
     deleted = deleteConversation(conversationId)
     invalidate(conversationId)
     forgetConversation(conversationId)
-    return deleted
+    if not deleted:
+        raise NotFoundError("Conversation not found.")
 
 
 def listConversationTurns(conversationId: int) -> dict:
+    _requireConversation(conversationId)
     return {
         "conversationId": conversationId,
         "turns": serializeStoredTurns(getConversationTurns(conversationId)),
@@ -595,6 +651,7 @@ def listConversationTurns(conversationId: int) -> dict:
 
 
 def listConversationGraph(conversationId: int) -> dict:
+    _requireConversation(conversationId)
     storedTurns = getConversationTurns(conversationId)
     graph = buildGraphPayloadFromStoredTurns(conversationId, storedTurns)
     return {"conversationId": conversationId, "nodes": graph["nodes"], "edges": graph["edges"]}
@@ -657,6 +714,7 @@ def listConversationConceptLinks(conversationId: int) -> dict:
     Shaped for the transcript drawer's "also discussed in" affordance: grouped
     by the local conceptId, each entry naming the far conversation and concept.
     """
+    _requireConversation(conversationId)
     members = getAllConceptMembers()
     labels = conceptLabelsFromMembers(members)
     titles = {conversation["id"]: conversation["title"] for conversation in listConversations()}
@@ -694,17 +752,25 @@ def listConversationConceptLinks(conversationId: int) -> dict:
     return {"conversationId": conversationId, "concepts": concepts}
 
 
-def createManualConceptLink(conceptKeyA: str, conceptKeyB: str, kind: str) -> dict | None:
+def createManualConceptLink(conceptKeyA: str, conceptKeyB: str, kind: str) -> dict:
     """Hand-link two concepts. Manual links carry score 1.0 (human-asserted) and
     survive re-analysis of either side as long as both concepts still exist —
-    see conceptKey in the persistence model. Returns None if either key is
-    unknown or they resolve to the same concept."""
+    see conceptKey in the persistence model. Raises InvalidInputError for an
+    unknown kind or a concept linked to itself, NotFoundError if either key
+    is unknown."""
+    if kind not in CONCEPT_LINK_KINDS:
+        raise InvalidInputError(f"kind must be one of {list(CONCEPT_LINK_KINDS)}.")
+    if conceptKeyA == conceptKeyB:
+        raise InvalidInputError("aConceptKey and bConceptKey must differ.")
     link = createManualConceptLinkDb(conceptKeyA, conceptKeyB, 1.0, kind)
-    return _serializeConceptEdge(link) if link is not None else None
+    if link is None:
+        raise NotFoundError("One or both concepts were not found.")
+    return _serializeConceptEdge(link)
 
 
-def removeConceptLink(linkId: int) -> bool:
-    return deleteConceptLink(linkId)
+def removeConceptLink(linkId: int) -> None:
+    if not deleteConceptLink(linkId):
+        raise NotFoundError("Concept link not found.")
 
 
 conversationTitleMaxChars = 60
@@ -719,15 +785,22 @@ def _titleFromText(text: str) -> str:
     return (head or collapsed[:conversationTitleMaxChars].rstrip()) + "…"
 
 
-def _resolveModelForConversation(conversationId: int, model: str | None) -> str | None:
-    """An explicit model on the request wins and becomes the conversation's
-    default; otherwise fall back to the conversation's stored choice, then to
-    the environment-configured provider (generateAiText / streamAiText's own
-    fallback when this returns None)."""
-    conversation = getConversation(conversationId)
-    if model and (conversation or {}).get("model") != model:
+def _prepareTurn(conversationId: int, userText: str, model: str | None) -> str | None:
+    """Everything that can reject a turn, checked before any model call or
+    write: the text is non-empty, the conversation exists (NotFoundError, which
+    takes precedence), and the model spec is well-formed.
+
+    Then pick the model: an explicit one on the request wins and becomes the
+    conversation's default; otherwise fall back to the conversation's stored
+    choice, then to the environment-configured provider (generateAiText /
+    streamAiText's own fallback when this returns None)."""
+    if not userText:
+        raise InvalidInputError("userText must not be empty.")
+    conversation = _requireConversation(conversationId)
+    requireValidModelSpec(model)
+    if model and conversation.get("model") != model:
         setConversationModel(conversationId, model)
-    return model or (conversation or {}).get("model")
+    return model or conversation.get("model")
 
 
 def _finalizeTurn(conversationId: int, userText: str, aiText: str) -> dict:
@@ -758,7 +831,7 @@ def _finalizeTurn(conversationId: int, userText: str, aiText: str) -> dict:
 def processChatMessage(
     conversationId: int, userText: str, model: str | None = None, apiKey: str | None = None
 ) -> dict:
-    modelSpec = _resolveModelForConversation(conversationId, model)
+    modelSpec = _prepareTurn(conversationId, userText, model)
     # Generate the AI reply before taking the lock so the (potentially slow) LLM
     # call does not serialize other work on this conversation's graph.
     aiText = generateAiText(userText, modelSpec, apiKey)
@@ -766,15 +839,24 @@ def processChatMessage(
 
 
 def streamChatMessage(conversationId: int, userText: str, model: str | None = None, apiKey: str | None = None):
-    """Generator of SSE-ready event dicts for one turn.
+    """Iterator of SSE-ready event dicts for one turn.
 
     Yields any number of {"type": "delta", "text": "..."} as the reply comes
     in, then exactly one {"type": "done", ...} carrying the same payload shape
     processChatMessage returns (turnId, aiText, turns, nodes, edges). Persists
     nothing until the reply is complete — same ordering as the blocking path,
     just with the network wait broken into visible pieces.
+
+    Request validation (NotFoundError / InvalidInputError) happens when this
+    is *called*, not on first iteration, so a caller can still turn a bad
+    request into an error response before it commits to streaming. Provider
+    failures (ProviderError) surface while iterating.
     """
-    modelSpec = _resolveModelForConversation(conversationId, model)
+    modelSpec = _prepareTurn(conversationId, userText, model)
+    return _streamTurnEvents(conversationId, userText, modelSpec, apiKey)
+
+
+def _streamTurnEvents(conversationId: int, userText: str, modelSpec: str | None, apiKey: str | None):
     chunks: list[str] = []
     for chunk in streamAiText(userText, modelSpec, apiKey):
         chunks.append(chunk)
@@ -782,13 +864,14 @@ def streamChatMessage(conversationId: int, userText: str, model: str | None = No
 
     aiText = "".join(chunks)
     if not aiText:
-        raise RuntimeError("Model returned no text output.")
+        raise ProviderError("Model returned no text output.")
 
     payload = _finalizeTurn(conversationId, userText, aiText)
     yield {"type": "done", **payload}
 
 
 def analyzeConversation(conversationId: int) -> dict:
+    _requireConversation(conversationId)
     with lockedGraph(conversationId) as graph:
         oldMembership, oldKeys = getConceptMembership(conversationId)
 
@@ -828,22 +911,48 @@ def analyzeConversation(conversationId: int) -> dict:
     }
 
 
+def _requireValidEdgeFields(label: str | None, confidence: float | None) -> None:
+    """Each field is checked only when given, so PATCH can pass a partial update."""
+    if label is not None and label not in EDGE_LABELS:
+        raise InvalidInputError(f"label must be one of {list(EDGE_LABELS)}.")
+    if confidence is not None and not 0.0 <= confidence <= 1.0:
+        raise InvalidInputError("confidence must be between 0.0 and 1.0.")
+
+
 def createConversationEdge(conversationId: int, fromTurnId: int, toTurnId: int, label: str, confidence: float) -> dict:
+    """Hand-draw an edge from an earlier turn to a later one. Raises
+    NotFoundError if the conversation or either turn doesn't exist,
+    InvalidInputError for a bad label/confidence or a backwards/self edge."""
+    _requireConversation(conversationId)
+    _requireValidEdgeFields(label, confidence)
+    if fromTurnId == toTurnId:
+        raise InvalidInputError("fromTurnId and toTurnId must differ.")
+    if fromTurnId > toTurnId:
+        raise InvalidInputError(
+            "fromTurnId must be earlier than toTurnId; edges point from the earlier turn to the later turn."
+        )
+    turnIds = set(getConversationTurnIds(conversationId))
+    missing = [turnId for turnId in (fromTurnId, toTurnId) if turnId not in turnIds]
+    if missing:
+        raise NotFoundError(f"Turns not found in conversation: {missing}.")
     edge = createEdge(conversationId, fromTurnId, toTurnId, label, confidence)
     invalidate(conversationId)
     return edge
 
 
-def patchConversationEdge(edgeId: int, label: str | None = None, confidence: float | None = None) -> dict | None:
+def patchConversationEdge(edgeId: int, label: str | None = None, confidence: float | None = None) -> dict:
+    _requireValidEdgeFields(label, confidence)
     edge = updateEdge(edgeId, label=label, confidence=confidence)
-    if edge is not None:
-        invalidate(edge["conversationId"])
+    if edge is None:
+        raise NotFoundError("Edge not found.")
+    invalidate(edge["conversationId"])
     return edge
 
 
-def removeConversationEdge(edgeId: int) -> bool:
+def removeConversationEdge(edgeId: int) -> None:
     edge = getEdge(edgeId)
     deleted = deleteEdge(edgeId)
     if deleted and edge is not None:
         invalidate(edge["conversationId"])
-    return deleted
+    if not deleted:
+        raise NotFoundError("Edge not found.")

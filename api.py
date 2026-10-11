@@ -4,7 +4,6 @@ import os
 import re
 from pathlib import Path
 
-import httpx
 from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
@@ -18,7 +17,6 @@ from chatService import (
     createManualConceptLink,
     deleteConversationSession,
     getConversationSession,
-    isValidModelSpec,
     listAvailableModels,
     listConceptGraph,
     listConversationConceptLinks,
@@ -35,7 +33,8 @@ from chatService import (
     streamChatMessage,
 )
 from conceptIndex import relinkAllConceptLinks
-from db import getConversationTurnIds, initDb
+from conversationErrors import InvalidInputError, NotFoundError, ProviderError
+from db import initDb
 from graphService import analyzeImmediateRelationship
 from analysisService import (
     buildConversationReport,
@@ -45,10 +44,7 @@ from analysisService import (
     searchConversations,
 )
 from contextService import buildContextHealth
-from ingestService import SOURCES, ingestConversation
-
-EDGE_LABELS = ("continuation", "branch", "related")
-CONCEPT_LINK_KINDS = ("same", "related")
+from ingestService import ingestConversation
 
 
 app = FastAPI()
@@ -103,17 +99,21 @@ if frontendAssetsDir.is_dir():
     app.mount("/assets", StaticFiles(directory=frontendAssetsDir), name="assets")
 
 
-MODEL_SPEC_HINT = "model must be 'stub', 'ollama:<name>', 'openai:<name>', 'anthropic:<name>', or 'gemini:<name>'."
+# The services own every rule and signal failure with a domain exception
+# (conversationErrors.py); this layer only maps each kind to a status code.
+@app.exception_handler(NotFoundError)
+async def handleNotFound(request: Request, error: NotFoundError):
+    return JSONResponse({"detail": str(error)}, status_code=status.HTTP_404_NOT_FOUND)
 
 
-def requireConversation(conversationId: int) -> None:
-    if getConversationSession(conversationId) is None:
-        raise HTTPException(status_code=404, detail="Conversation not found.")
+@app.exception_handler(InvalidInputError)
+async def handleInvalidInput(request: Request, error: InvalidInputError):
+    return JSONResponse({"detail": str(error)}, status_code=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
 
-def requireValidModel(model: str | None) -> None:
-    if model is not None and not isValidModelSpec(model):
-        raise HTTPException(status_code=422, detail=MODEL_SPEC_HINT)
+@app.exception_handler(ProviderError)
+async def handleProviderError(request: Request, error: ProviderError):
+    return JSONResponse({"detail": f"Model provider error: {error}"}, status_code=status.HTTP_502_BAD_GATEWAY)
 
 
 class CreateConversationRequest(BaseModel):
@@ -256,7 +256,7 @@ def pullOllama(req: PullOllamaModelRequest):
         try:
             for progress in pullOllamaModel(req.model):
                 yield f"data: {json.dumps(progress)}\n\n"
-        except (httpx.HTTPError, RuntimeError) as error:
+        except ProviderError as error:
             yield f"data: {json.dumps({'status': 'error', 'message': str(error)})}\n\n"
 
     return StreamingResponse(events(), media_type="text/event-stream")
@@ -264,7 +264,6 @@ def pullOllama(req: PullOllamaModelRequest):
 
 @app.post("/conversations", status_code=status.HTTP_201_CREATED)
 def createConversation(req: CreateConversationRequest):
-    requireValidModel(req.model)
     return createConversationSession(req.title, req.model)
 
 
@@ -275,53 +274,40 @@ def listConversations():
 
 @app.get("/conversations/{conversationId}")
 def getConversation(conversationId: int):
-    conversation = getConversationSession(conversationId)
-    if conversation is None:
-        raise HTTPException(status_code=404, detail="Conversation not found.")
-    return conversation
+    return getConversationSession(conversationId)
 
 
 @app.patch("/conversations/{conversationId}")
 def updateConversation(conversationId: int, req: UpdateConversationRequest):
-    requireValidModel(req.model)
-    conversation = setConversationSessionModel(conversationId, req.model)
-    if conversation is None:
-        raise HTTPException(status_code=404, detail="Conversation not found.")
-    return conversation
+    return setConversationSessionModel(conversationId, req.model)
 
 
 @app.delete("/conversations/{conversationId}", status_code=status.HTTP_204_NO_CONTENT)
 def deleteConversation(conversationId: int):
-    deleted = deleteConversationSession(conversationId)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Conversation not found.")
+    deleteConversationSession(conversationId)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.post("/conversations/{conversationId}/turns", status_code=status.HTTP_201_CREATED)
 def createTurn(conversationId: int, req: CreateTurnRequest):
-    requireConversation(conversationId)
-    requireValidModel(req.model)
-    try:
-        return processChatMessage(conversationId, req.userText, req.model, req.apiKey)
-    except (httpx.HTTPError, RuntimeError) as error:
-        raise HTTPException(status_code=502, detail=f"Model provider error: {error}") from error
+    return processChatMessage(conversationId, req.userText, req.model, req.apiKey)
 
 
 @app.post("/conversations/{conversationId}/turns/stream")
 def createTurnStream(conversationId: int, req: CreateTurnRequest):
-    requireConversation(conversationId)
-    requireValidModel(req.model)
+    # Called (not iterated) here: a bad conversation or model raises now and
+    # becomes a real 404/422, before the response commits to streaming.
+    stream = streamChatMessage(conversationId, req.userText, req.model, req.apiKey)
 
     def events():
         # The response has already started (200, text/event-stream) by the
-        # time a provider or persistence failure can happen, so a failure here
-        # goes out as an {"type": "error"} event rather than an HTTP status —
-        # there is no HTTP status left to change at this point.
+        # time a provider failure can happen, so a failure here goes out as an
+        # {"type": "error"} event rather than an HTTP status — there is no HTTP
+        # status left to change at this point.
         try:
-            for event in streamChatMessage(conversationId, req.userText, req.model, req.apiKey):
+            for event in stream:
                 yield f"data: {json.dumps(event)}\n\n"
-        except (httpx.HTTPError, RuntimeError) as error:
+        except ProviderError as error:
             yield f"data: {json.dumps({'type': 'error', 'message': f'Model provider error: {error}'})}\n\n"
 
     return StreamingResponse(events(), media_type="text/event-stream")
@@ -329,67 +315,48 @@ def createTurnStream(conversationId: int, req: CreateTurnRequest):
 
 @app.get("/conversations/{conversationId}/turns")
 def getTurns(conversationId: int):
-    requireConversation(conversationId)
     return listConversationTurns(conversationId)
 
 
 @app.post("/conversations/{conversationId}/analyze")
 def analyze(conversationId: int):
-    requireConversation(conversationId)
     return analyzeConversation(conversationId)
 
 
 @app.get("/conversations/{conversationId}/graph")
 def getGraph(conversationId: int):
-    requireConversation(conversationId)
     return listConversationGraph(conversationId)
 
 
 @app.get("/conversations/{conversationId}/concept-links")
 def getConversationConceptLinks(conversationId: int):
-    requireConversation(conversationId)
     return listConversationConceptLinks(conversationId)
 
 
 @app.get("/conversations/{conversationId}/summary")
 def getConversationSummary(conversationId: int):
-    summary = buildConversationSummary(conversationId)
-    if summary is None:
-        raise HTTPException(status_code=404, detail="Conversation not found.")
-    return summary
+    return buildConversationSummary(conversationId)
 
 
 @app.post("/conversations/{conversationId}/summary/llm")
 def getLlmSummary(conversationId: int, req: LlmSummaryRequest):
-    requireValidModel(req.model)
-    summary = buildLlmSummary(conversationId, req.model, req.apiKey)
-    if summary is None:
-        raise HTTPException(status_code=404, detail="Conversation not found.")
-    return summary
+    return buildLlmSummary(conversationId, req.model, req.apiKey)
 
 
 @app.get("/conversations/{conversationId}/context-health")
 def getContextHealth(conversationId: int):
-    health = buildContextHealth(conversationId)
-    if health is None:
-        raise HTTPException(status_code=404, detail="Conversation not found.")
-    return health
+    return buildContextHealth(conversationId)
 
 
 @app.post("/ingest/conversations", status_code=status.HTTP_200_OK)
 def ingestConversationEndpoint(req: IngestConversationRequest):
-    if req.source not in SOURCES:
-        raise HTTPException(status_code=422, detail=f"source must be one of {list(SOURCES)}.")
-    try:
-        return ingestConversation(
-            req.source,
-            req.externalId,
-            [message.model_dump() for message in req.messages],
-            req.title,
-            req.url,
-        )
-    except ValueError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
+    return ingestConversation(
+        req.source,
+        req.externalId,
+        [message.model_dump() for message in req.messages],
+        req.title,
+        req.url,
+    )
 
 
 @app.get("/conversations/{conversationId}/report")
@@ -397,8 +364,6 @@ def getConversationReport(conversationId: int, format: str = "markdown"):
     if format not in ("markdown", "json"):
         raise HTTPException(status_code=422, detail="format must be 'markdown' or 'json'.")
     report = buildConversationReport(conversationId)
-    if report is None:
-        raise HTTPException(status_code=404, detail="Conversation not found.")
     title = report["conversation"]["title"] or f"conversation-{conversationId}"
     safeTitle = re.sub(r"[^a-zA-Z0-9_-]+", "-", title).strip("-") or f"conversation-{conversationId}"
     if format == "json":
@@ -416,10 +381,6 @@ def getConversationReport(conversationId: int, format: str = "markdown"):
 
 @app.get("/search")
 def search(query: str, limit: int = 20, conversationId: int | None = None):
-    if not query.strip():
-        raise HTTPException(status_code=422, detail="query must not be empty.")
-    if not 1 <= limit <= 100:
-        raise HTTPException(status_code=422, detail="limit must be between 1 and 100.")
     return searchConversations(query, limit, conversationId)
 
 
@@ -435,42 +396,17 @@ def relinkConcepts():
 
 @app.post("/concept-links", status_code=status.HTTP_201_CREATED)
 def createConceptLink(req: CreateConceptLinkRequest):
-    if req.kind not in CONCEPT_LINK_KINDS:
-        raise HTTPException(status_code=422, detail=f"kind must be one of {list(CONCEPT_LINK_KINDS)}.")
-    if req.aConceptKey == req.bConceptKey:
-        raise HTTPException(status_code=422, detail="aConceptKey and bConceptKey must differ.")
-    link = createManualConceptLink(req.aConceptKey, req.bConceptKey, req.kind)
-    if link is None:
-        raise HTTPException(status_code=404, detail="One or both concepts were not found.")
-    return link
+    return createManualConceptLink(req.aConceptKey, req.bConceptKey, req.kind)
 
 
 @app.delete("/concept-links/{linkId}", status_code=status.HTTP_204_NO_CONTENT)
 def deleteConceptLink(linkId: int):
-    deleted = removeConceptLink(linkId)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Concept link not found.")
+    removeConceptLink(linkId)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.post("/edges", status_code=status.HTTP_201_CREATED)
 def createEdge(req: CreateEdgeRequest):
-    requireConversation(req.conversationId)
-    if req.label not in EDGE_LABELS:
-        raise HTTPException(status_code=422, detail=f"label must be one of {list(EDGE_LABELS)}.")
-    if not 0.0 <= req.confidence <= 1.0:
-        raise HTTPException(status_code=422, detail="confidence must be between 0.0 and 1.0.")
-    if req.fromTurnId == req.toTurnId:
-        raise HTTPException(status_code=422, detail="fromTurnId and toTurnId must differ.")
-    if req.fromTurnId > req.toTurnId:
-        raise HTTPException(
-            status_code=422,
-            detail="fromTurnId must be earlier than toTurnId; edges point from the earlier turn to the later turn.",
-        )
-    turnIds = set(getConversationTurnIds(req.conversationId))
-    missing = [turnId for turnId in (req.fromTurnId, req.toTurnId) if turnId not in turnIds]
-    if missing:
-        raise HTTPException(status_code=404, detail=f"Turns not found in conversation: {missing}.")
     return createConversationEdge(
         conversationId=req.conversationId,
         fromTurnId=req.fromTurnId,
@@ -482,21 +418,12 @@ def createEdge(req: CreateEdgeRequest):
 
 @app.patch("/edges/{edgeId}")
 def updateEdge(edgeId: int, req: UpdateEdgeRequest):
-    if req.label is not None and req.label not in EDGE_LABELS:
-        raise HTTPException(status_code=422, detail=f"label must be one of {list(EDGE_LABELS)}.")
-    if req.confidence is not None and not 0.0 <= req.confidence <= 1.0:
-        raise HTTPException(status_code=422, detail="confidence must be between 0.0 and 1.0.")
-    edge = patchConversationEdge(edgeId, label=req.label, confidence=req.confidence)
-    if edge is None:
-        raise HTTPException(status_code=404, detail="Edge not found.")
-    return edge
+    return patchConversationEdge(edgeId, label=req.label, confidence=req.confidence)
 
 
 @app.delete("/edges/{edgeId}", status_code=status.HTTP_204_NO_CONTENT)
 def deleteEdge(edgeId: int):
-    deleted = removeConversationEdge(edgeId)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Edge not found.")
+    removeConversationEdge(edgeId)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
