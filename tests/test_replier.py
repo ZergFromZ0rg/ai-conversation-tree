@@ -288,3 +288,57 @@ def test_history_reaches_the_replier_over_http(client):
     client.post(f"/conversations/{conversationId}/turns", json={"userText": "What are cats?"})
     client.post(f"/conversations/{conversationId}/turns", json={"userText": "What do they eat?"})
     assert [message["content"] for message in requests[1].history] == ["What are cats?", "answer 1"]
+
+
+# --- an explicit model is remembered only once the turn has worked ---------------
+
+def failing(request):
+    raise ProviderError("provider down")
+
+
+def test_a_failed_turn_leaves_the_conversations_model_and_version_alone(conversationId):
+    providers.setReplier(failing)
+    versionBefore = db.getConversationVersion(conversationId)
+    with pytest.raises(ProviderError):
+        processChatMessage(conversationId, "hello", "typo-model")
+    assert getConversationSession(conversationId)["model"] is None
+    assert db.getConversationVersion(conversationId) == versionBefore, "a failed turn must not touch the conversation"
+
+
+def test_a_failed_turn_does_not_replace_the_model_the_conversation_already_had(conversationId):
+    providers.setReplier(lambda request: "ok")
+    processChatMessage(conversationId, "first", "good-model")
+    providers.setReplier(failing)
+    with pytest.raises(ProviderError):
+        processChatMessage(conversationId, "second", "other-model")
+    assert getConversationSession(conversationId)["model"] == "good-model"
+
+
+def test_a_blank_reply_does_not_save_the_model_either(conversationId):
+    providers.setReplier(lambda request: "")
+    with pytest.raises(ProviderError):
+        processChatMessage(conversationId, "hello", "typo-model")
+    assert getConversationSession(conversationId)["model"] is None
+
+
+def test_a_stream_that_breaks_does_not_save_the_model(conversationId):
+    class Breaks(providers.Replier):
+        def generate(self, request):
+            raise AssertionError("streaming only")
+
+        def stream(self, request):
+            yield "partial "
+            raise ProviderError("connection dropped")
+
+    providers.setReplier(Breaks())
+    with pytest.raises(ProviderError):
+        list(streamChatMessage(conversationId, "hello", "typo-model"))
+    assert getConversationSession(conversationId)["model"] is None
+
+
+def test_a_successful_turn_saves_the_explicit_model_blocking_and_streaming(conversationId):
+    providers.setReplier(lambda request: "ok")
+    processChatMessage(conversationId, "first", "model-a")
+    assert getConversationSession(conversationId)["model"] == "model-a"
+    list(streamChatMessage(conversationId, "second", "model-b"))
+    assert getConversationSession(conversationId)["model"] == "model-b"

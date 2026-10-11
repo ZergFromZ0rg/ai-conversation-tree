@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import NamedTuple
 
 from .conversationErrors import InvalidInputError, NotFoundError, ProviderError
 from .db import (
@@ -337,22 +338,30 @@ def titleFromText(text: str) -> str:
     return (head or collapsed[:conversationTitleMaxChars].rstrip()) + "…"
 
 
-def _prepareTurn(conversationId: int, userText: str, model: str | None) -> str | None:
+class _TurnPlan(NamedTuple):
+    modelSpec: str | None
+    """The model to ask for; None means the replier's own default."""
+
+    rememberModel: str | None
+    """An explicit model that should become the conversation's default, once the turn has succeeded."""
+
+
+def _prepareTurn(conversationId: int, userText: str, model: str | None) -> _TurnPlan:
     """Everything that can reject a turn, checked before any model call or
     write: the text is non-empty, the conversation exists (NotFoundError, which
     takes precedence), and the model spec is well-formed.
 
-    Then pick the model: an explicit one on the request wins and becomes the
-    conversation's default; otherwise fall back to the conversation's stored
-    choice, then to the replier's own default (what the replier does when this
-    returns None)."""
+    Then pick the model: an explicit one on the request wins, otherwise the
+    conversation's stored choice, otherwise the replier's own default. An
+    explicit model becomes the conversation's default only after the turn has
+    succeeded (see ``rememberModel``): a request that fails must leave the
+    conversation as it found it."""
     if not userText:
         raise InvalidInputError("userText must not be empty.")
     conversation = _requireConversation(conversationId)
     requireValidModelSpec(model)
-    if model and conversation.get("model") != model:
-        setConversationModel(conversationId, model)
-    return model or conversation.get("model")
+    remember = model if model and conversation.get("model") != model else None
+    return _TurnPlan(model or conversation.get("model"), remember)
 
 
 def appendTurn(conversationId: int, userText: str, aiText: str) -> dict:
@@ -373,10 +382,11 @@ def appendTurn(conversationId: int, userText: str, aiText: str) -> dict:
     return _finalizeTurn(conversationId, userText, aiText)
 
 
-def _finalizeTurn(conversationId: int, userText: str, aiText: str) -> dict:
+def _finalizeTurn(conversationId: int, userText: str, aiText: str, rememberModel: str | None = None) -> dict:
     """Shared tail of the blocking and streaming send paths: classify and
     persist the turn, auto-title the conversation on its first turn, and
-    refresh cross-chat concept links. Assumes the AI reply is already in hand."""
+    refresh cross-chat concept links. Assumes the AI reply is already in hand.
+    `rememberModel`, when given, becomes the conversation's default model."""
     conversation = getConversation(conversationId)
 
     with lockedGraph(conversationId) as graph:
@@ -388,6 +398,9 @@ def _finalizeTurn(conversationId: int, userText: str, aiText: str) -> dict:
     # it was already given a title (e.g. POST /conversations {"title": ...}).
     if turn.timelineParent is None and not (conversation or {}).get("title"):
         setConversationTitle(conversationId, titleFromText(userText))
+
+    if rememberModel:
+        setConversationModel(conversationId, rememberModel)
 
     # Outside the lock: refresh this conversation's cross-chat concept links
     # (debounced, best-effort — never fails the turn).
@@ -420,11 +433,13 @@ def _replyRequest(conversationId: int, userText: str, modelSpec: str | None, api
 def processChatMessage(
     conversationId: int, userText: str, model: str | None = None, apiKey: str | None = None
 ) -> dict:
-    modelSpec = _prepareTurn(conversationId, userText, model)
+    plan = _prepareTurn(conversationId, userText, model)
     # Generate the AI reply before taking the lock so the (potentially slow) LLM
     # call does not serialize other work on this conversation's graph.
-    aiText = _requireReplyText(getReplier().generate(_replyRequest(conversationId, userText, modelSpec, apiKey)))
-    return _finalizeTurn(conversationId, userText, aiText)
+    aiText = _requireReplyText(
+        getReplier().generate(_replyRequest(conversationId, userText, plan.modelSpec, apiKey))
+    )
+    return _finalizeTurn(conversationId, userText, aiText, plan.rememberModel)
 
 
 def streamChatMessage(conversationId: int, userText: str, model: str | None = None, apiKey: str | None = None):
@@ -441,12 +456,12 @@ def streamChatMessage(conversationId: int, userText: str, model: str | None = No
     request into an error response before it commits to streaming. Provider
     failures (ProviderError) surface while iterating.
     """
-    modelSpec = _prepareTurn(conversationId, userText, model)
-    request = _replyRequest(conversationId, userText, modelSpec, apiKey)
-    return _streamTurnEvents(conversationId, userText, request)
+    plan = _prepareTurn(conversationId, userText, model)
+    request = _replyRequest(conversationId, userText, plan.modelSpec, apiKey)
+    return _streamTurnEvents(conversationId, userText, request, plan.rememberModel)
 
 
-def _streamTurnEvents(conversationId: int, userText: str, request: ReplyRequest):
+def _streamTurnEvents(conversationId: int, userText: str, request: ReplyRequest, rememberModel: str | None):
     chunks: list[str] = []
     for chunk in getReplier().stream(request):
         if not isinstance(chunk, str):
@@ -456,7 +471,7 @@ def _streamTurnEvents(conversationId: int, userText: str, request: ReplyRequest)
 
     aiText = _requireReplyText("".join(chunks))
 
-    payload = _finalizeTurn(conversationId, userText, aiText)
+    payload = _finalizeTurn(conversationId, userText, aiText, rememberModel)
     yield {"type": "done", **payload}
 
 
