@@ -15,8 +15,8 @@ from pathlib import Path
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
-from conversation_tree import conceptIndex
-from conversation_tree import db
+import conversation_tree
+from conversation_tree import Settings, conceptIndex, db
 from conversation_tree.chatService import persistGraphTurn
 from conversation_tree.graphService import ConversationGraph, addTurn
 
@@ -31,8 +31,8 @@ def buildConversation(title, messages):
 
 
 def runCase(name, conversations, expectedPairs, expectedKind=None):
-    db.dbPath = Path(tempfile.gettempdir()) / f"eval_concept_links_{uuid.uuid4().hex}.db"
-    db.initDb()
+    dbPath = Path(tempfile.gettempdir()) / f"eval_concept_links_{uuid.uuid4().hex}.db"
+    conversation_tree.init(Settings(dbPath=dbPath))
     conceptIndex._lastRelink.clear()
 
     titleById = {}
@@ -59,7 +59,7 @@ def runCase(name, conversations, expectedPairs, expectedKind=None):
     print(f"{status:4}  {name}: {detail}")
 
     for suffix in ("", "-wal", "-shm"):
-        Path(str(db.dbPath) + suffix).unlink(missing_ok=True)
+        Path(str(dbPath) + suffix).unlink(missing_ok=True)
     return ok
 
 

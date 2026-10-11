@@ -24,7 +24,7 @@ three sources through the ingest API.
 ```bash
 # 1. backend + viewer (see Local Setup for the one-time install)
 AI_CONVERSATION_TREE_STUB_LLM=1 AI_CONVERSATION_TREE_CONTEXT_TOKENS=400 \
-  venv/bin/python -m uvicorn conversation_tree.api:app
+  venv/bin/python -m uvicorn --factory conversation_tree.api:createApp
 
 # 2. in another terminal: load the demo workspace through the ingest API
 venv/bin/python scripts/seed_demo.py
@@ -250,8 +250,11 @@ Backend (the `conversation_tree/` package; importing the package itself is
 cheap, the embedding models load when `graphService` is first imported):
 
 - `api.py`
-  - HTTP routes, auth, CORS, and the viewer shell. Holds no domain rules: it
-    maps the services' exceptions to status codes. Needs the `server` extra
+  - HTTP routes, auth, CORS, and the viewer shell, built by `createApp()`.
+    Holds no domain rules: it maps the services' exceptions to status codes.
+    Needs the `server` extra
+- `config.py`, `lifecycle.py`
+  - `Settings`, and `init()` / `warmup()` (see "Configuration")
 - `__main__.py`
   - `python -m conversation_tree`: a tiny REPL that classifies turns you type
     in, no server or database involved
@@ -304,6 +307,42 @@ Frontend (`frontend/src/`):
     `GraphRail`, `GraphDrawer` (with the "also discussed elsewhere" panel),
     `TurnGraph`, `WorkspaceMap`
 
+### Configuration
+
+Importing the package reads no environment, opens no database, and loads no
+model. The host configures it once:
+
+```python
+import conversation_tree
+from conversation_tree import Settings
+
+conversation_tree.init(Settings(dbPath="/var/lib/odysseus/conversations.db"))
+conversation_tree.warmup()   # optional: load the embedding models now, not on first use
+```
+
+`init()` creates the database (idempotent) and drops any state tied to a
+previous configuration. Services called before it raise `NotConfiguredError`.
+`init()` with no argument reads the environment, which is what the bundled app
+does:
+
+| `Settings` field | Environment variable | Default from the environment |
+| --- | --- | --- |
+| `dbPath` | `AI_CONVERSATION_TREE_DB` | `.data/conversationTree.db` under the working directory |
+| `contextWindowTokens` | `AI_CONVERSATION_TREE_CONTEXT_TOKENS` | `8000` (also the default of a plain `Settings`) |
+| `pgvectorUrl` | `PGVECTOR_DATABASE_URL`, then `DATABASE_URL` | the local Compose database (a plain `Settings` leaves pgvector off) |
+
+The HTTP-only options (`AI_CONVERSATION_TREE_API_TOKEN`,
+`AI_CONVERSATION_TREE_CORS_ORIGINS`) live in `api.ServerOptions`, so the logic
+layer never sees them. `createApp(settings, options)` configures the package in
+its startup hook and loads the models before accepting requests; serve it with
+`uvicorn --factory conversation_tree.api:createApp`. Reply-provider settings
+(`OPENAI_API_KEY`, `OLLAMA_BASE_URL`, `AI_CONVERSATION_TREE_STUB_LLM`, …) are
+still read from the environment when a reply is generated.
+
+The embedding models (`all-MiniLM-L6-v2` and its cross-encoder) are fixed, not
+settings: the classifier thresholds were tuned for them and the pgvector table is
+sized for their 384 dimensions.
+
 ### Using The Services Directly
 
 The HTTP layer is a thin skin. Every rule (label and confidence ranges, edge
@@ -333,7 +372,8 @@ the auth/CORS middleware.
 ## Persistence Model
 
 Everything is saved locally in `.data/conversationTree.db` (`SQLite`, WAL mode)
-by default. Set `AI_CONVERSATION_TREE_DB` to choose another path. Runtime data
+by default, relative to the directory you start the app from (the server logs
+the path it chose). Set `AI_CONVERSATION_TREE_DB` to choose another path. Runtime data
 is ignored by Git; the old root-level `conversationTree.db` is retained only
 as a legacy sample database.
 
@@ -785,7 +825,7 @@ unset AI_CONVERSATION_TREE_STUB_LLM
 ### 4. Start the app
 
 ```bash
-venv/bin/python -m uvicorn conversation_tree.api:app --reload
+venv/bin/python -m uvicorn --factory conversation_tree.api:createApp --reload
 ```
 
 Open:
@@ -1022,7 +1062,8 @@ Planned work:
 
 ## Notes
 
-- Runtime data lives in `.data/conversationTree.db` by default. Set
+- Runtime data lives in `.data/conversationTree.db` (relative to the working
+  directory) by default. Set
   `AI_CONVERSATION_TREE_DB` to migrate or use another database path. A legacy
   root-level `conversationTree.db` is no longer used by default.
 - If you use `Ollama`, make sure the local Ollama server is running before starting the backend.

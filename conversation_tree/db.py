@@ -1,26 +1,20 @@
 import json
-import os
 import sqlite3
 import struct
 import uuid
-from pathlib import Path
 
-
-# Next to the package, i.e. the repo root in a source checkout. Set
-# AI_CONVERSATION_TREE_DB to put the database anywhere else.
-_defaultDataDir = Path(__file__).resolve().parent.parent / ".data"
-dbPath = Path(os.environ.get("AI_CONVERSATION_TREE_DB", _defaultDataDir / "conversationTree.db"))
+from .config import getSettings
 
 
 def getConnection() -> sqlite3.Connection:
-    connection = sqlite3.connect(dbPath)
+    connection = sqlite3.connect(getSettings().dbPath)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
 
 
 def initDb():
-    dbPath.parent.mkdir(parents=True, exist_ok=True)
+    getSettings().dbPath.parent.mkdir(parents=True, exist_ok=True)
     connection = getConnection()
     try:
         # WAL lets readers run concurrently with the single writer, so the

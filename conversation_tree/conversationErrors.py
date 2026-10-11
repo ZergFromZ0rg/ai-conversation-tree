@@ -22,3 +22,7 @@ class InvalidInputError(ConversationTreeError, ValueError):
 
 class ProviderError(ConversationTreeError, RuntimeError):
     """The model provider failed, is unreachable, or is not configured."""
+
+
+class NotConfiguredError(ConversationTreeError, RuntimeError):
+    """A service ran before the host called ``conversation_tree.init(...)``."""

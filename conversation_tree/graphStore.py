@@ -81,3 +81,13 @@ def invalidate(conversationId: int) -> None:
     """Drop a conversation's cached graph (after out-of-band edits or deletion)."""
     with _cacheLock:
         _cache.pop(conversationId, None)
+
+
+def clear() -> None:
+    """Drop every cached graph (the settings, hence the database, changed).
+
+    The per-conversation locks stay: they don't depend on the database, and
+    replacing one that is held would let two writers into the same conversation.
+    """
+    with _cacheLock:
+        _cache.clear()

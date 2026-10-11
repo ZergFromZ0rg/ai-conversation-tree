@@ -1,18 +1,44 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
+import threading
 from .db import getConversationTurns
 from .models import TurnModel
 
 import numpy as np
 import re
-from sentence_transformers import CrossEncoder, SentenceTransformer
 
 biEncoderModelName = 'all-MiniLM-L6-v2'
 crossEncoderModelName = 'cross-encoder/ms-marco-MiniLM-L-6-v2'
 
-model = SentenceTransformer(biEncoderModelName)
-crossEncoder = CrossEncoder(crossEncoderModelName)
+# The models load on first use, not on import, so importing this module (and
+# everything that imports it) stays cheap. loadModels() is also what
+# conversation_tree.warmup() calls to pay the cost up front.
+_loadedModels = None
+_modelsLock = threading.Lock()
+
+
+def loadModels():
+    """Load the bi-encoder and cross-encoder once and return (biEncoder, crossEncoder)."""
+    global _loadedModels
+    if _loadedModels is None:
+        with _modelsLock:
+            if _loadedModels is None:
+                from sentence_transformers import CrossEncoder, SentenceTransformer
+
+                _loadedModels = (
+                    SentenceTransformer(biEncoderModelName),
+                    CrossEncoder(crossEncoderModelName),
+                )
+    return _loadedModels
+
+
+def biEncoder():
+    return loadModels()[0]
+
+
+def crossEncoder():
+    return loadModels()[1]
 
 
 @dataclass
@@ -198,7 +224,7 @@ def nextId(graph: ConversationGraph) -> int:
 
 @lru_cache(maxsize=2048)
 def encodeText(text: str):
-    return model.encode(text)
+    return biEncoder().encode(text)
 
 
 def normalizeWord(word: str) -> str:
@@ -372,7 +398,7 @@ def sigmoid(score: float) -> float:
 # Model scoring helpers
 
 def embeddingSimilarity(leftEmbedding, rightEmbedding) -> float:
-    return model.similarity(
+    return biEncoder().similarity(
         leftEmbedding.reshape(1, -1),
         rightEmbedding.reshape(1, -1),
     ).item()
@@ -386,7 +412,7 @@ def crossEncoderScore(userText: str, context: str) -> float:
     if not cleanContext:
         return 0.0
 
-    rawScore = crossEncoder.predict([(userText, cleanContext)])[0]
+    rawScore = crossEncoder().predict([(userText, cleanContext)])[0]
     if np.isnan(rawScore):
         return 0.0
     safeScore = float(np.nan_to_num(rawScore, nan=0.0, posinf=20.0, neginf=-20.0))
@@ -862,9 +888,10 @@ def analyzeImmediateRelationship(
     similarity: float | None = None,
 ) -> dict:
     if similarity is None:
-        previousEmbedding = model.encode(previousUserText + " " + previousAiText)
-        userEmbedding = model.encode(userText)
-        similarity = model.similarity(
+        encoder = biEncoder()
+        previousEmbedding = encoder.encode(previousUserText + " " + previousAiText)
+        userEmbedding = encoder.encode(userText)
+        similarity = encoder.similarity(
             userEmbedding.reshape(1, -1),
             previousEmbedding.reshape(1, -1),
         ).item()

@@ -1,15 +1,16 @@
 """Optional PostgreSQL/pgvector ANN storage for turn embeddings.
 
 SQLite remains the source of truth for conversation metadata and graph edges.
-When PGVECTOR_DATABASE_URL is configured, this module mirrors turn embeddings
+When Settings.pgvectorUrl is set, this module mirrors turn embeddings
 into PostgreSQL and uses an HNSW cosine index for older-turn retrieval. Every
 operation is best-effort: a missing or unavailable PostgreSQL service falls
 back to the local NumPy path.
 """
 
 import logging
-import os
 import time
+
+from .config import currentSettings
 
 logger = logging.getLogger(__name__)
 embeddingDimensions = 384
@@ -17,15 +18,19 @@ _schemaReady = False
 _nextSchemaAttempt = 0.0
 schemaRetrySeconds = 30.0
 connectTimeoutSeconds = 3
-defaultDatabaseUrl = "postgresql://conversation_tree:conversation_tree@127.0.0.1:5432/conversation_tree"
+
+
+def reset() -> None:
+    """Forget the schema state; called by init() when the settings change."""
+    global _schemaReady, _nextSchemaAttempt
+    _schemaReady = False
+    _nextSchemaAttempt = 0.0
 
 
 def _databaseUrl() -> str | None:
-    return (
-        os.environ.get("PGVECTOR_DATABASE_URL")
-        or os.environ.get("DATABASE_URL")
-        or defaultDatabaseUrl
-    )
+    """Disabled (None) until the host configures a URL, or before init()."""
+    settings = currentSettings()
+    return settings.pgvectorUrl if settings else None
 
 
 def enabled() -> bool:

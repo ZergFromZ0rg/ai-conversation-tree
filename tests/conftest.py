@@ -1,15 +1,13 @@
-"""Shared fixtures. The environment is set before any app module is imported:
-db.py reads AI_CONVERSATION_TREE_DB at import time, and the models must load
-from the local Hugging Face cache (no network in tests)."""
+"""Shared fixtures. The package is configured the way a host would configure
+it: an explicit Settings passed to init(), against a throwaway database. Only
+the model-loading environment is set up front (no network in tests, so the
+models must come from the local Hugging Face cache)."""
 
 import os
 import tempfile
 from pathlib import Path
 
-_dataDir = tempfile.mkdtemp(prefix="act-tests-")
-os.environ["AI_CONVERSATION_TREE_DB"] = str(Path(_dataDir) / "test.db")
 os.environ["AI_CONVERSATION_TREE_STUB_LLM"] = "1"
-os.environ.pop("AI_CONVERSATION_TREE_API_TOKEN", None)
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
@@ -18,14 +16,29 @@ import asyncio
 
 import httpx
 
-from conversation_tree import api
+import conversation_tree
+from conversation_tree import Settings, api
 from conversation_tree.db import listConversations
 from conversation_tree.chatService import deleteConversationSession
 
 
+@pytest.fixture(scope="session", autouse=True)
+def configured():
+    """The package's settings for the whole run (a throwaway database)."""
+    return conversation_tree.init(Settings(dbPath=Path(tempfile.mkdtemp(prefix="act-tests-")) / "test.db"))
+
+
+@pytest.fixture()
+def reconfigurable(configured):
+    """For tests that call init() with other settings: restores the session's afterwards."""
+    yield
+    conversation_tree.init(configured)
+
+
 @pytest.fixture(scope="session")
-def _app():
-    return api.app
+def _app(configured):
+    # Explicit options, so nothing in the environment can switch auth on.
+    return api.createApp(options=api.ServerOptions())
 
 
 class SyncClient:
@@ -66,6 +79,16 @@ def client(_app):
     yield SyncClient(_app)
     for conversation in listConversations():
         deleteConversationSession(conversation["id"])
+
+
+@pytest.fixture()
+def serverClient():
+    """Build a client for an app with specific HTTP options, e.g. serverClient(apiToken="x")."""
+
+    def make(**options):
+        return SyncClient(api.createApp(options=api.ServerOptions(**options)))
+
+    return make
 
 
 def chat(*pairs):

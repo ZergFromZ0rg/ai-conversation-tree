@@ -24,8 +24,8 @@ def payload(externalId="r1", messages=CATS):
 
 # --- auth responses must carry CORS headers -------------------------------
 
-def test_401_is_readable_cross_origin(client, monkeypatch):
-    monkeypatch.setenv("AI_CONVERSATION_TREE_API_TOKEN", "s3cret")
+def test_401_is_readable_cross_origin(serverClient):
+    client = serverClient(apiToken="s3cret")
     response = client.get("/conversations", headers={"Origin": "http://localhost:5173"})
     assert response.status_code == 401
     assert response.headers["access-control-allow-origin"] == "http://localhost:5173"

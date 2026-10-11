@@ -16,16 +16,15 @@ Everything here is deterministic. ``analyzeContextHealth`` is pure (it takes
 the vectors as an argument) so it can be tested without loading any model.
 """
 
-import os
 import re
 
 import numpy as np
 
+from .config import DEFAULT_CONTEXT_WINDOW_TOKENS, getSettings
 from .conversationErrors import NotFoundError
 
-# Rough size of the span a model is assumed to attend to well. Tokens are
-# estimated as chars / 4. Override per deployment for a larger/smaller model.
-defaultWindowTokens = int(os.environ.get("AI_CONVERSATION_TREE_CONTEXT_TOKENS", "8000"))
+# Tokens are estimated as chars / 4. How large a window to assume comes from
+# Settings.contextWindowTokens (a larger or smaller model needs a different one).
 charsPerToken = 4
 reaskSimilarity = 0.80
 immediateReaskSimilarity = 0.90
@@ -72,7 +71,7 @@ def analyzeContextHealth(
     turns: list[dict],
     userVectors: np.ndarray,
     edges: list[dict],
-    windowTokens: int = defaultWindowTokens,
+    windowTokens: int = DEFAULT_CONTEXT_WINDOW_TOKENS,
 ) -> dict:
     """Score each turn for signs that earlier context was lost.
 
@@ -202,6 +201,6 @@ def buildContextHealth(conversationId: int, windowTokens: int | None = None) -> 
         vectors = vectors / np.maximum(np.linalg.norm(vectors, axis=1, keepdims=True), 1e-8)
     else:
         vectors = np.zeros((0, 1), dtype=np.float32)
-    report = analyzeContextHealth(turns, vectors, edges, windowTokens or defaultWindowTokens)
+    report = analyzeContextHealth(turns, vectors, edges, windowTokens or getSettings().contextWindowTokens)
     report["conversationId"] = conversationId
     return report

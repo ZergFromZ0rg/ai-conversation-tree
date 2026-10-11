@@ -3,8 +3,8 @@ def test_healthz_is_public_and_open_by_default(client):
     assert client.get("/conversations").status_code == 200
 
 
-def test_token_gates_the_api_but_not_the_shell(client, monkeypatch):
-    monkeypatch.setenv("AI_CONVERSATION_TREE_API_TOKEN", "s3cret")
+def test_token_gates_the_api_but_not_the_shell(serverClient):
+    client = serverClient(apiToken="s3cret")
     assert client.get("/healthz").status_code == 200
     assert client.get("/").status_code == 200
     assert client.get("/conversations").status_code == 401
