@@ -8,18 +8,18 @@ re-syncing a chat that grew by a few messages costs a few turns, not a rebuild.
 
 from datetime import datetime
 
-from .chatService import titleFromText, persistGraphTurn
+from .chatService import persistGraphTurn, titleFromText, turnBundle
 from .conceptIndex import maybeRelinkConcepts
 from .conversationErrors import ConflictError, InvalidInputError
 from .db import (
-    clearConversationTurns,
     createConversation,
     findConversationBySource,
     getConversationTurns,
+    replaceConversationTurns,
     setConversationTitle,
     updateConversationSource,
 )
-from .graphService import addTurn, resetConversation
+from .graphService import ConversationGraph, addTurn
 from .graphStore import invalidate, lockedGraph
 
 SOURCES = ("chatgpt", "claude", "gemini", "other")
@@ -77,6 +77,24 @@ def _sharedPrefixLength(stored: list[tuple[str, str]], incoming: list[tuple[str,
     return shared
 
 
+def _replaceHistory(conversationId: int, incoming: list[tuple[str, str]]) -> None:
+    """Rebuild a diverged conversation without ever leaving it half-deleted.
+
+    The incoming history is classified against a scratch in-memory graph (it has
+    no conversation id, so nearest-turn search is an exact in-memory scan and
+    never consults an index that still describes the old history), and only
+    then does one transaction swap it in for the stored turns. If classification
+    or the swap fails, the previous history is untouched.
+    """
+    scratch = ConversationGraph()
+    bundles = []
+    for userText, aiText in incoming:
+        turn = addTurn(scratch, userText, aiText)
+        turn.timestamp = datetime.now()
+        bundles.append(turnBundle(turn))
+    replaceConversationTurns(conversationId, bundles)
+
+
 def ingestConversation(
     source: str,
     externalId: str,
@@ -121,16 +139,16 @@ def ingestConversation(
         stored = [(turn["userText"], turn["aiText"]) for turn in getConversationTurns(conversationId)]
         shared = _sharedPrefixLength(stored, incoming)
         if shared < len(stored):
-            # Diverged: drop the old classification and start over.
-            clearConversationTurns(conversationId)
-            resetConversation(graph)
+            # Diverged (an edited prompt or regenerated answer): rebuild from
+            # the incoming history, atomically.
+            _replaceHistory(conversationId, incoming)
             shared = 0
             rebuilt = True
-
-        for userText, aiText in incoming[shared:]:
-            turn = addTurn(graph, userText, aiText)
-            turn.timestamp = datetime.now()
-            persistGraphTurn(conversationId, turn)
+        else:
+            for userText, aiText in incoming[shared:]:
+                turn = addTurn(graph, userText, aiText)
+                turn.timestamp = datetime.now()
+                persistGraphTurn(conversationId, turn)
         addedTurns = len(incoming) - shared
     invalidate(conversationId)
 

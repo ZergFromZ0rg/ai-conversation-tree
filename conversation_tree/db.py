@@ -370,25 +370,6 @@ def updateConversationSource(conversationId: int, title: str | None, sourceUrl: 
         connection.close()
 
 
-def clearConversationTurns(conversationId: int) -> None:
-    """Remove every turn (and its edges, concepts, embeddings) but keep the
-    conversation row. Used when a re-synced chat diverged from what was stored
-    (an edited prompt or regenerated answer), so the history is rebuilt."""
-    connection = getConnection()
-    try:
-        for table in ("semanticEdges", "turnConcepts", "turnEmbeddings", "turns"):
-            connection.execute(f"DELETE FROM {table} WHERE conversationId = ?", (conversationId,))
-        pruneOrphanConceptLinks(connection)
-        connection.execute(
-            "UPDATE conversations SET updatedAt = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = ?",
-            (conversationId,),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-    _dropMirroredVectors(conversationId)
-
-
 def _dropMirroredVectors(conversationId: int) -> None:
     """Best-effort: remove a conversation's rows from the optional pgvector index."""
     try:
@@ -477,6 +458,80 @@ def deleteConversation(conversationId: int) -> bool:
     return deleted
 
 
+_TURN_TABLES = ("semanticEdges", "turnConcepts", "turnEmbeddings", "turns")
+
+
+def _insertTurnBundle(
+    connection: sqlite3.Connection,
+    conversationId: int,
+    turnId: int,
+    userText: str,
+    aiText: str,
+    timestamp: str,
+    root: bool,
+    timelineParent: int | None,
+    embeddingBytes: bytes,
+    semanticParents: list[tuple[int, str, float]],
+    conceptIds: list[int],
+) -> None:
+    """Write one turn's rows (turn, embedding, classifier edges, concept
+    memberships) on an open connection. The caller owns the transaction."""
+    connection.execute(
+        """
+        INSERT INTO turns (turnId, conversationId, userText, aiText, timestamp, root, timelineParent)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (turnId, conversationId, userText, aiText, timestamp, int(root), timelineParent),
+    )
+    connection.execute(
+        "INSERT OR REPLACE INTO turnEmbeddings (conversationId, turnId, embedding) VALUES (?, ?, ?)",
+        (conversationId, turnId, sqlite3.Binary(embeddingBytes)),
+    )
+    connection.executemany(
+        """
+        INSERT INTO semanticEdges (conversationId, fromTurnId, toTurnId, label, confidence, origin)
+        VALUES (?, ?, ?, ?, ?, 'auto')
+        """,
+        [
+            (conversationId, fromTurnId, turnId, label, confidence)
+            for fromTurnId, label, confidence in semanticParents
+        ],
+    )
+    # A root turn introduces a brand-new concept; inheriting turns reuse the
+    # key already on that concept's earlier members.
+    keyByConceptId = {
+        int(row["conceptId"]): row["conceptKey"]
+        for row in connection.execute(
+            "SELECT DISTINCT conceptId, conceptKey FROM turnConcepts "
+            "WHERE conversationId = ? AND conceptKey IS NOT NULL",
+            (conversationId,),
+        ).fetchall()
+    }
+    conceptRows = []
+    for conceptId in conceptIds:
+        key = keyByConceptId.get(conceptId)
+        if key is None:
+            key = uuid.uuid4().hex
+            keyByConceptId[conceptId] = key
+        conceptRows.append((conversationId, turnId, conceptId, key))
+    connection.executemany(
+        "INSERT INTO turnConcepts (conversationId, turnId, conceptId, conceptKey) VALUES (?, ?, ?, ?)",
+        conceptRows,
+    )
+
+
+def _mirrorEmbedding(conversationId: int, turnId: int, embeddingBytes: bytes) -> None:
+    """PostgreSQL is an optional ANN accelerator; SQLite persistence must stay
+    reliable when it is not configured or temporarily offline."""
+    try:
+        import numpy as np
+        from .vectorStore import upsertEmbedding
+
+        upsertEmbedding(conversationId, turnId, np.frombuffer(embeddingBytes, dtype=np.float32))
+    except Exception:
+        pass
+
+
 def saveTurnBundle(
     conversationId: int,
     turnId: int,
@@ -494,47 +549,9 @@ def saveTurnBundle(
     turn without its embedding or edges."""
     connection = getConnection()
     try:
-        connection.execute(
-            """
-            INSERT INTO turns (turnId, conversationId, userText, aiText, timestamp, root, timelineParent)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (turnId, conversationId, userText, aiText, timestamp, int(root), timelineParent),
-        )
-        connection.execute(
-            "INSERT OR REPLACE INTO turnEmbeddings (conversationId, turnId, embedding) VALUES (?, ?, ?)",
-            (conversationId, turnId, sqlite3.Binary(embeddingBytes)),
-        )
-        connection.executemany(
-            """
-            INSERT INTO semanticEdges (conversationId, fromTurnId, toTurnId, label, confidence, origin)
-            VALUES (?, ?, ?, ?, ?, 'auto')
-            """,
-            [
-                (conversationId, fromTurnId, turnId, label, confidence)
-                for fromTurnId, label, confidence in semanticParents
-            ],
-        )
-        # A root turn introduces a brand-new concept; inheriting turns reuse the
-        # key already on that concept's earlier members.
-        keyByConceptId = {
-            int(row["conceptId"]): row["conceptKey"]
-            for row in connection.execute(
-                "SELECT DISTINCT conceptId, conceptKey FROM turnConcepts "
-                "WHERE conversationId = ? AND conceptKey IS NOT NULL",
-                (conversationId,),
-            ).fetchall()
-        }
-        conceptRows = []
-        for conceptId in conceptIds:
-            key = keyByConceptId.get(conceptId)
-            if key is None:
-                key = uuid.uuid4().hex
-                keyByConceptId[conceptId] = key
-            conceptRows.append((conversationId, turnId, conceptId, key))
-        connection.executemany(
-            "INSERT INTO turnConcepts (conversationId, turnId, conceptId, conceptKey) VALUES (?, ?, ?, ?)",
-            conceptRows,
+        _insertTurnBundle(
+            connection, conversationId, turnId, userText, aiText, timestamp, root,
+            timelineParent, embeddingBytes, semanticParents, conceptIds,
         )
         touchConversation(connection, conversationId)
         connection.commit()
@@ -544,15 +561,38 @@ def saveTurnBundle(
     finally:
         connection.close()
 
-    # PostgreSQL is an optional ANN accelerator; SQLite persistence must stay
-    # reliable when it is not configured or temporarily offline.
-    try:
-        import numpy as np
-        from .vectorStore import upsertEmbedding
+    _mirrorEmbedding(conversationId, turnId, embeddingBytes)
 
-        upsertEmbedding(conversationId, turnId, np.frombuffer(embeddingBytes, dtype=np.float32))
+
+def replaceConversationTurns(conversationId: int, bundles: list[dict]) -> None:
+    """Swap a conversation's entire stored history for `bundles` in one transaction.
+
+    Each bundle holds the keyword arguments of saveTurnBundle (without the
+    conversation id). Used when a re-synced chat diverged from what was stored
+    (an edited prompt or regenerated answer): the new history is classified
+    first, off to the side, and only then replaces the old one. All-or-nothing:
+    a failure leaves the previous turns, edges, concepts, and embeddings exactly
+    as they were. Concept links to the old concepts are pruned, since the
+    rebuilt concepts get new keys.
+    """
+    connection = getConnection()
+    try:
+        for table in _TURN_TABLES:
+            connection.execute(f"DELETE FROM {table} WHERE conversationId = ?", (conversationId,))
+        for bundle in bundles:
+            _insertTurnBundle(connection, conversationId, **bundle)
+        pruneOrphanConceptLinks(connection)
+        touchConversation(connection, conversationId)
+        connection.commit()
     except Exception:
-        pass
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+    _dropMirroredVectors(conversationId)
+    for bundle in bundles:
+        _mirrorEmbedding(conversationId, bundle["turnId"], bundle["embeddingBytes"])
 
 
 def applyReclassification(

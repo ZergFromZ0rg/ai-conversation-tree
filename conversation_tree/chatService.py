@@ -128,9 +128,9 @@ def buildConversationPayload(conversationId: int) -> dict:
     }
 
 
-def persistGraphTurn(conversationId: int, turn) -> None:
-    saveTurnBundle(
-        conversationId=conversationId,
+def turnBundle(turn) -> dict:
+    """A classified turn as the keyword arguments the database stores it with."""
+    return dict(
         turnId=turn.id,
         userText=turn.userText,
         aiText=turn.aiText,
@@ -141,6 +141,10 @@ def persistGraphTurn(conversationId: int, turn) -> None:
         semanticParents=turn.semanticParents,
         conceptIds=turn.conceptIds,
     )
+
+
+def persistGraphTurn(conversationId: int, turn) -> None:
+    saveTurnBundle(conversationId=conversationId, **turnBundle(turn))
 
 
 

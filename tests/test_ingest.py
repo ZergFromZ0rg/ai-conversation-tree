@@ -1,5 +1,10 @@
+import sqlite3
+
+import pytest
+
 from conftest import chat
-from conversation_tree.ingestService import pairMessagesIntoTurns
+from conversation_tree import db, ingestService, vectorStore
+from conversation_tree.ingestService import ingestConversation, pairMessagesIntoTurns
 
 CATS = chat(
     ("What are cats?", "Cats are small carnivorous mammals kept as pets."),
@@ -99,6 +104,82 @@ def test_edited_history_rebuilds_the_conversation(client):
     assert again["rebuilt"] is True
     turns = client.get(f"/conversations/{first['conversationId']}/turns").json()["turns"]
     assert [turn["userText"] for turn in turns] == ["What are dogs?", "What do dogs eat?"]
+
+
+# --- a rebuild is all-or-nothing ---------------------------------------------
+
+EDITED = chat(
+    ("What are dogs?", "Dogs are domesticated canines."),
+    ("What do dogs eat?", "Dogs eat meat."),
+)
+
+
+def snapshot(conversationId):
+    """Everything stored for a conversation: turns (with embeddings, edges, concepts) and edges."""
+    return db.getConversationTurns(conversationId), db.listConversationEdges(conversationId)
+
+
+def test_a_rebuild_that_fails_while_classifying_keeps_the_old_history(client, monkeypatch):
+    conversationId = ingestConversation("chatgpt", "abc", CATS)["conversationId"]
+    before = snapshot(conversationId)
+
+    realAddTurn, calls = ingestService.addTurn, []
+
+    def flaky(graph, userText, aiText):
+        calls.append(userText)
+        if len(calls) == 2:
+            raise RuntimeError("model fell over")
+        return realAddTurn(graph, userText, aiText)
+
+    monkeypatch.setattr(ingestService, "addTurn", flaky)
+    with pytest.raises(RuntimeError, match="fell over"):
+        ingestConversation("chatgpt", "abc", EDITED)
+    assert snapshot(conversationId) == before, "the old history must survive a failed rebuild"
+
+    monkeypatch.setattr(ingestService, "addTurn", realAddTurn)
+    assert ingestConversation("chatgpt", "abc", EDITED)["rebuilt"] is True, "a later sync still succeeds"
+
+
+def test_a_rebuild_that_fails_while_writing_rolls_back_the_deletion(client, monkeypatch):
+    conversationId = ingestConversation("chatgpt", "abc", CATS)["conversationId"]
+    before = snapshot(conversationId)
+
+    realInsert, calls = db._insertTurnBundle, []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise sqlite3.OperationalError("disk full")
+        return realInsert(*args, **kwargs)
+
+    monkeypatch.setattr(db, "_insertTurnBundle", flaky)
+    with pytest.raises(sqlite3.OperationalError):
+        ingestConversation("chatgpt", "abc", EDITED)
+    assert len(calls) == 2, "the failure happened after the old rows were deleted in the transaction"
+    assert snapshot(conversationId) == before
+    assert len([row for row in db.getAllTurnEmbeddings() if row["conversationId"] == conversationId]) == 2
+
+
+def test_a_successful_rebuild_replaces_everything_and_leaves_nothing_behind(client):
+    conversationId = ingestConversation("chatgpt", "abc", CATS)["conversationId"]
+    result = ingestConversation("chatgpt", "abc", EDITED)
+    assert result["rebuilt"] is True and result["addedTurns"] == 2 and result["turnCount"] == 2
+
+    turns, _edges = snapshot(conversationId)
+    assert [turn["id"] for turn in turns] == [0, 1]
+    assert [turn["userText"] for turn in turns] == ["What are dogs?", "What do dogs eat?"]
+    assert all(turn["embedding"] for turn in turns)
+    assert len([row for row in db.getAllTurnEmbeddings() if row["conversationId"] == conversationId]) == 2
+
+
+def test_a_rebuild_classifies_in_memory_and_never_asks_the_vector_index(client, monkeypatch):
+    ingestConversation("chatgpt", "abc", CATS)
+
+    def forbidden(**_kwargs):
+        raise AssertionError("the index still describes the old history")
+
+    monkeypatch.setattr(vectorStore, "searchConversation", forbidden)
+    assert ingestConversation("chatgpt", "abc", EDITED)["rebuilt"] is True
 
 
 def test_same_external_id_from_different_sources_stays_separate(client):
