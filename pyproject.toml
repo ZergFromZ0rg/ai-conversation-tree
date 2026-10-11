@@ -35,7 +35,10 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["conversation_tree*"]
 
+# The only pytest configuration: a pytest.ini next to this file would make pytest
+# ignore this section entirely.
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Lets `pytest` import conversation_tree from a plain checkout, no install needed.
 pythonpath = ["."]
+filterwarnings = ["ignore::DeprecationWarning"]
