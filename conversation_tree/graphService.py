@@ -1,8 +1,8 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
-from db import getConversationTurns
-from models import TurnModel
+from .db import getConversationTurns
+from .models import TurnModel
 
 import numpy as np
 import re
@@ -802,7 +802,7 @@ def strongestEdgeConfidence(confidences: dict) -> float:
 # Cross-link retrieval
 
 def retrieveCrossLinkCandidates(graph: ConversationGraph, embedding, timelineParent: int | None) -> list[tuple[int, float]]:
-    from vectorStore import searchConversation
+    from .vectorStore import searchConversation
 
     pgCandidates = searchConversation(
         conversationId=graph.conversationId,

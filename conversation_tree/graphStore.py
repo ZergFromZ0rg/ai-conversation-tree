@@ -15,8 +15,8 @@ import threading
 from collections import OrderedDict
 from contextlib import contextmanager
 
-from db import getConversationVersion
-from graphService import ConversationGraph, loadConversationGraph
+from .db import getConversationVersion
+from .graphService import ConversationGraph, loadConversationGraph
 
 maxCachedGraphs = 32
 

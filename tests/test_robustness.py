@@ -6,14 +6,14 @@ from datetime import datetime
 import numpy as np
 import pytest
 
-import db
-import graphService
-import ingestService
-import vectorStore
+from conversation_tree import db
+from conversation_tree import graphService
+from conversation_tree import ingestService
+from conversation_tree import vectorStore
 from conftest import chat
-from graphService import ConversationGraph
-from graphStore import lockedGraph
-from models import TurnModel
+from conversation_tree.graphService import ConversationGraph
+from conversation_tree.graphStore import lockedGraph
+from conversation_tree.models import TurnModel
 
 CATS = chat(("What are cats?", "Small carnivorous mammals."))
 

@@ -15,10 +15,10 @@ from pathlib import Path
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
-import conceptIndex
-import db
-from chatService import persistGraphTurn
-from graphService import ConversationGraph, addTurn
+from conversation_tree import conceptIndex
+from conversation_tree import db
+from conversation_tree.chatService import persistGraphTurn
+from conversation_tree.graphService import ConversationGraph, addTurn
 
 
 def buildConversation(title, messages):

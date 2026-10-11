@@ -23,9 +23,9 @@ import uuid
 
 import numpy as np
 
-from db import getAllConceptMembers, listAllConceptLinks, replaceAutoConceptLinks
+from .db import getAllConceptMembers, listAllConceptLinks, replaceAutoConceptLinks
 
-logger = logging.getLogger("conceptIndex")
+logger = logging.getLogger(__name__)
 
 # Score bands for a concept pair (mean of the top-k pairwise cosines). Tuned
 # against eval_concept_links.py: with all-MiniLM-L6-v2 on short questions,

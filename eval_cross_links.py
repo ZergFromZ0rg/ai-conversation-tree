@@ -3,7 +3,7 @@ import os
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
-from graphService import ConversationGraph, addTurn
+from conversation_tree.graphService import ConversationGraph, addTurn
 
 
 def olderEdgeSet(turn):

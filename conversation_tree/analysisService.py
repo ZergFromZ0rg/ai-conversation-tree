@@ -6,16 +6,16 @@ import re
 
 import numpy as np
 
-from conversationErrors import InvalidInputError, NotFoundError
-from db import (
+from .conversationErrors import InvalidInputError, NotFoundError
+from .db import (
     getConversation,
     getConversationTurns,
     getAllSearchTurns,
     getAllTurnEmbeddings,
     listConversationEdges,
 )
-from graphService import encodeText
-from vectorStore import searchWorkspace
+from .graphService import encodeText
+from .vectorStore import searchWorkspace
 
 _wordPattern = re.compile(r"[a-z0-9][a-z0-9'_-]{1,}", re.IGNORECASE)
 _stopwords = frozenset(
@@ -195,7 +195,7 @@ def buildLlmSummary(conversationId: int, model: str | None = None, apiKey: str |
     always gets a usable summary. Raises InvalidInputError for a malformed
     model spec and NotFoundError for an unknown conversation.
     """
-    from chatService import envDefaultModelSpec, generateAiText, requireValidModelSpec
+    from .chatService import envDefaultModelSpec, generateAiText, requireValidModelSpec
 
     requireValidModelSpec(model)
     base = buildConversationSummary(conversationId)

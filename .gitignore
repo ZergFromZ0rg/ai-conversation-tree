@@ -10,3 +10,5 @@ __pycache__/
 conversationTree.db
 conversationTree.db-wal
 conversationTree.db-shm
+*.egg-info/
+/build/

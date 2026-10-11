@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Str
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from chatService import (
+from .chatService import (
     analyzeConversation,
     createConversationEdge,
     createConversationSession,
@@ -32,24 +32,24 @@ from chatService import (
     setConversationSessionModel,
     streamChatMessage,
 )
-from conceptIndex import relinkAllConceptLinks
-from conversationErrors import InvalidInputError, NotFoundError, ProviderError
-from db import initDb
-from graphService import analyzeImmediateRelationship
-from analysisService import (
+from .conceptIndex import relinkAllConceptLinks
+from .conversationErrors import InvalidInputError, NotFoundError, ProviderError
+from .db import initDb
+from .graphService import analyzeImmediateRelationship
+from .analysisService import (
     buildConversationReport,
     buildConversationSummary,
     buildLlmSummary,
     reportAsMarkdown,
     searchConversations,
 )
-from contextService import buildContextHealth
-from ingestService import ingestConversation
+from .contextService import buildContextHealth
+from .ingestService import ingestConversation
 
 
 app = FastAPI()
 initDb()
-frontendDistDir = Path(__file__).parent / "frontend" / "dist"
+frontendDistDir = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 # Hosted deployments set a shared token; every API route then requires it
 # (`Authorization: Bearer <token>`). The static viewer shell, /healthz and the

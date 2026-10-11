@@ -5,7 +5,7 @@ from pathlib import Path
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
-from graphService import analyzeImmediateRelationship
+from conversation_tree.graphService import analyzeImmediateRelationship
 
 
 def main():

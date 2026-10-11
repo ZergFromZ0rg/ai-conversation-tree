@@ -22,8 +22,7 @@ def test_llm_summary_falls_back_on_the_stub_model(client):
 
 
 def test_llm_summary_uses_the_model_text_and_caches(client, monkeypatch):
-    import chatService
-
+    from conversation_tree import chatService
     calls = []
 
     def fake(prompt, spec, key=None):
@@ -41,8 +40,7 @@ def test_llm_summary_uses_the_model_text_and_caches(client, monkeypatch):
 
 
 def test_llm_summary_survives_provider_failure(client, monkeypatch):
-    import chatService
-
+    from conversation_tree import chatService
     def boom(*args, **kwargs):
         raise RuntimeError("provider down")
 

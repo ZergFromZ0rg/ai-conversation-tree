@@ -26,7 +26,8 @@ SentenceTransformer('all-MiniLM-L6-v2'); CrossEncoder('cross-encoder/ms-marco-Mi
 RUN chmod -R a+rX /opt/hf
 ENV HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 
-COPY *.py eval_cases.json ./
+COPY conversation_tree ./conversation_tree
+COPY eval_*.py eval_cases.json ./
 COPY --from=frontend /app/frontend/dist ./frontend/dist
 
 RUN mkdir /data && useradd --system app && chown app /data
@@ -35,4 +36,4 @@ VOLUME /data
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "conversation_tree.api:app", "--host", "0.0.0.0", "--port", "8000"]

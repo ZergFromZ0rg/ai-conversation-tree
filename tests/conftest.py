@@ -3,7 +3,6 @@ db.py reads AI_CONVERSATION_TREE_DB at import time, and the models must load
 from the local Hugging Face cache (no network in tests)."""
 
 import os
-import sys
 import tempfile
 from pathlib import Path
 
@@ -13,16 +12,15 @@ os.environ["AI_CONVERSATION_TREE_STUB_LLM"] = "1"
 os.environ.pop("AI_CONVERSATION_TREE_API_TOKEN", None)
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 import asyncio
 
 import httpx
 
-import api
-from db import listConversations
-from chatService import deleteConversationSession
+from conversation_tree import api
+from conversation_tree.db import listConversations
+from conversation_tree.chatService import deleteConversationSession
 
 
 @pytest.fixture(scope="session")

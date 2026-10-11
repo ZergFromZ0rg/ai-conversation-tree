@@ -1,8 +1,9 @@
 venv/
 .git/
 .data/
-__pycache__/
-*.pyc
+**/__pycache__/
+**/*.pyc
+*.egg-info/
 *.db
 *.db-wal
 *.db-shm

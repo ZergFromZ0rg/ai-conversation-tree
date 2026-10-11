@@ -1,6 +1,6 @@
 import numpy as np
 
-from contextService import analyzeContextHealth, estimateTokens
+from conversation_tree.contextService import analyzeContextHealth, estimateTokens
 
 
 def unit(*values):

@@ -5,9 +5,9 @@ FastAPI app (a CLI, another application) relies on."""
 import httpx
 import pytest
 
-import chatService
-from analysisService import buildConversationReport, buildConversationSummary, buildLlmSummary, searchConversations
-from chatService import (
+from conversation_tree import chatService
+from conversation_tree.analysisService import buildConversationReport, buildConversationSummary, buildLlmSummary, searchConversations
+from conversation_tree.chatService import (
     analyzeConversation,
     createConversationEdge,
     createConversationSession,
@@ -25,9 +25,9 @@ from chatService import (
     streamAiText,
     streamChatMessage,
 )
-from contextService import buildContextHealth
-from conversationErrors import ConversationTreeError, InvalidInputError, NotFoundError, ProviderError
-from ingestService import ingestConversation
+from conversation_tree.contextService import buildContextHealth
+from conversation_tree.conversationErrors import ConversationTreeError, InvalidInputError, NotFoundError, ProviderError
+from conversation_tree.ingestService import ingestConversation
 from conftest import chat
 
 MISSING = 9999

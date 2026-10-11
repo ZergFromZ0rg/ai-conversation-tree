@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "conversation-tree"
+version = "0.1.0"
+description = "Models a chat as a semantic graph of turns: classifies how each turn relates to earlier ones, links concepts across conversations, and flags context loss."
+readme = "README.md"
+requires-python = ">=3.10"
+
+# The logic layer only. Floors are the major versions the lockfile
+# (requirements.txt) was tested with; loosen them against a host's own stack.
+dependencies = [
+    "numpy>=2",
+    "sentence-transformers>=5",
+    "httpx>=0.28",
+]
+
+[project.optional-dependencies]
+# The HTTP layer (conversation_tree.api) and the viewer it serves.
+server = [
+    "fastapi>=0.109",
+    "uvicorn>=0.24",
+]
+# Scalable turn retrieval through PostgreSQL + pgvector.
+pgvector = [
+    "psycopg[binary]>=3.2,<4",
+]
+dev = [
+    "pytest>=8,<10",
+    "pyflakes",
+]
+
+[tool.setuptools.packages.find]
+include = ["conversation_tree*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Lets `pytest` import conversation_tree from a plain checkout, no install needed.
+pythonpath = ["."]

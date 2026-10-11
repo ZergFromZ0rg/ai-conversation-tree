@@ -1,5 +1,5 @@
 from conftest import chat
-from ingestService import pairMessagesIntoTurns
+from conversation_tree.ingestService import pairMessagesIntoTurns
 
 CATS = chat(
     ("What are cats?", "Cats are small carnivorous mammals kept as pets."),

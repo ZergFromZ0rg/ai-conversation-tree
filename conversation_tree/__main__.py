@@ -1,4 +1,4 @@
-from graphService import ConversationGraph, addTurn
+from .graphService import ConversationGraph, addTurn
 
 
 def main():

@@ -24,7 +24,7 @@ three sources through the ingest API.
 ```bash
 # 1. backend + viewer (see Local Setup for the one-time install)
 AI_CONVERSATION_TREE_STUB_LLM=1 AI_CONVERSATION_TREE_CONTEXT_TOKENS=400 \
-  venv/bin/python -m uvicorn api:app
+  venv/bin/python -m uvicorn conversation_tree.api:app
 
 # 2. in another terminal: load the demo workspace through the ingest API
 venv/bin/python scripts/seed_demo.py
@@ -246,11 +246,15 @@ Frontend:
 
 ## Project Structure
 
-Backend:
+Backend (the `conversation_tree/` package; importing the package itself is
+cheap, the embedding models load when `graphService` is first imported):
 
 - `api.py`
   - HTTP routes, auth, CORS, and the viewer shell. Holds no domain rules: it
-    maps the services' exceptions to status codes
+    maps the services' exceptions to status codes. Needs the `server` extra
+- `__main__.py`
+  - `python -m conversation_tree`: a tiny REPL that classifies turns you type
+    in, no server or database involved
 - `conversationErrors.py`
   - the services' error contract (see "Using The Services Directly")
 - `chatService.py`
@@ -279,6 +283,10 @@ Backend:
 
 Elsewhere:
 
+- `pyproject.toml` — package metadata; dependencies split into the core logic
+  and the `server`, `pgvector`, and `dev` extras
+- `requirements.txt` — the tested, pinned set that the Docker image and the
+  quick start install
 - `tests/` — the pytest suite
 - `scripts/seed_demo.py` — loads the demo workspace through the ingest API
 - `Dockerfile`, `docker-compose.yml` — hosted deployment
@@ -301,7 +309,9 @@ Frontend (`frontend/src/`):
 The HTTP layer is a thin skin. Every rule (label and confidence ranges, edge
 direction, model-spec format, search limits, import sources) is enforced inside
 the service functions, so a caller that is not FastAPI gets the same behaviour.
-Failures are signalled with three exceptions from `conversationErrors.py`,
+Import them from the package (`from conversation_tree import chatService`);
+the HTTP layer is not needed. Failures are signalled with three exceptions
+from `conversationErrors.py`,
 never with `None` / `False` returns or transport errors:
 
 | Exception | Meaning | HTTP | Also a |
@@ -702,6 +712,14 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+To use the logic as a library instead (in another project or virtualenv):
+
+```bash
+pip install -e .            # core logic only: numpy, sentence-transformers, httpx
+pip install -e ".[server]"  # + the FastAPI layer and uvicorn
+pip install -e ".[pgvector]" # + PostgreSQL/pgvector retrieval
+```
+
 ### Optional pgvector acceleration
 
 For larger workspaces, start PostgreSQL with the included Compose file:
@@ -767,7 +785,7 @@ unset AI_CONVERSATION_TREE_STUB_LLM
 ### 4. Start the app
 
 ```bash
-venv/bin/python -m uvicorn api:app --reload
+venv/bin/python -m uvicorn conversation_tree.api:app --reload
 ```
 
 Open:
@@ -893,7 +911,7 @@ The classifier is graded separately by the eval scripts below.
 Lint (unused imports / names):
 
 ```bash
-venv/bin/pip install pyflakes && venv/bin/python -m pyflakes *.py scripts tests
+venv/bin/pip install pyflakes && venv/bin/python -m pyflakes conversation_tree *.py scripts tests
 ```
 
 Evaluation scripts:

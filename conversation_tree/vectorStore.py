@@ -11,7 +11,7 @@ import logging
 import os
 import time
 
-logger = logging.getLogger("vectorStore")
+logger = logging.getLogger(__name__)
 embeddingDimensions = 384
 _schemaReady = False
 _nextSchemaAttempt = 0.0
@@ -86,7 +86,7 @@ def _backfillExistingEmbeddings() -> None:
     """Mirror embeddings already present in SQLite after first enablement."""
     try:
         import numpy as np
-        from db import getConnection
+        from .db import getConnection
 
         sqliteConnection = getConnection()
         try:

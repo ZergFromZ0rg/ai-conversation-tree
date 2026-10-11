@@ -5,9 +5,7 @@ import json
 import httpx
 import pytest
 
-import chatService
-
-
+from conversation_tree import chatService
 def newConversation(client, title=None, model=None):
     body = {"title": title, "model": model}
     response = client.post("/conversations", json=body)

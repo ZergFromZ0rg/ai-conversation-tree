@@ -9,10 +9,10 @@ re-syncing a chat that grew by a few messages costs a few turns, not a rebuild.
 import sqlite3
 from datetime import datetime
 
-from chatService import _titleFromText, persistGraphTurn
-from conceptIndex import maybeRelinkConcepts
-from conversationErrors import InvalidInputError
-from db import (
+from .chatService import _titleFromText, persistGraphTurn
+from .conceptIndex import maybeRelinkConcepts
+from .conversationErrors import InvalidInputError
+from .db import (
     clearConversationTurns,
     createConversation,
     findConversationBySource,
@@ -20,8 +20,8 @@ from db import (
     setConversationTitle,
     updateConversationSource,
 )
-from graphService import addTurn, resetConversation
-from graphStore import invalidate, lockedGraph
+from .graphService import addTurn, resetConversation
+from .graphStore import invalidate, lockedGraph
 
 SOURCES = ("chatgpt", "claude", "gemini", "other")
 

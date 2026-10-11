@@ -6,8 +6,8 @@ import os
 import time
 import httpx
 
-from conversationErrors import InvalidInputError, NotFoundError, ProviderError
-from db import (
+from .conversationErrors import InvalidInputError, NotFoundError, ProviderError
+from .db import (
     applyReclassification,
     createEdge,
     createConversation,
@@ -30,14 +30,14 @@ from db import (
     setConversationTitle,
     updateEdge,
 )
-from conceptIndex import (
+from .conceptIndex import (
     conceptLabelsFromMembers,
     forgetConversation,
     matchConceptKeys,
     maybeRelinkConcepts,
 )
-from graphService import addTurn, reclassifyTurns
-from graphStore import invalidate, lockedGraph
+from .graphService import addTurn, reclassifyTurns
+from .graphStore import invalidate, lockedGraph
 
 EDGE_LABELS = ("continuation", "branch", "related")
 CONCEPT_LINK_KINDS = ("same", "related")

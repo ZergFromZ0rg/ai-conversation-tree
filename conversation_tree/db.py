@@ -6,7 +6,9 @@ import uuid
 from pathlib import Path
 
 
-_defaultDataDir = Path(__file__).with_name(".data")
+# Next to the package, i.e. the repo root in a source checkout. Set
+# AI_CONVERSATION_TREE_DB to put the database anywhere else.
+_defaultDataDir = Path(__file__).resolve().parent.parent / ".data"
 dbPath = Path(os.environ.get("AI_CONVERSATION_TREE_DB", _defaultDataDir / "conversationTree.db"))
 
 
@@ -392,7 +394,7 @@ def clearConversationTurns(conversationId: int) -> None:
 def _dropMirroredVectors(conversationId: int) -> None:
     """Best-effort: remove a conversation's rows from the optional pgvector index."""
     try:
-        from vectorStore import deleteConversationVectors
+        from .vectorStore import deleteConversationVectors
 
         deleteConversationVectors(conversationId)
     except Exception:
@@ -548,7 +550,7 @@ def saveTurnBundle(
     # reliable when it is not configured or temporarily offline.
     try:
         import numpy as np
-        from vectorStore import upsertEmbedding
+        from .vectorStore import upsertEmbedding
 
         upsertEmbedding(conversationId, turnId, np.frombuffer(embeddingBytes, dtype=np.float32))
     except Exception:
