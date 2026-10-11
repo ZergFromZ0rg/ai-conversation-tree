@@ -4,6 +4,7 @@ import struct
 import uuid
 
 from .config import getSettings
+from .conversationErrors import ConflictError
 
 
 def getConnection() -> sqlite3.Connection:
@@ -278,6 +279,9 @@ def createConversation(
         )
         connection.commit()
         return int(cursor.lastrowid)
+    except sqlite3.IntegrityError as error:
+        # Only the unique (source, externalId) index can fail here.
+        raise ConflictError(f"A conversation from {source!r} with id {externalId!r} already exists.") from error
     finally:
         connection.close()
 

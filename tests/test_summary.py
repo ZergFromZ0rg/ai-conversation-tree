@@ -1,4 +1,6 @@
 from conftest import chat
+from conversation_tree import providers
+from conversation_tree.conversationErrors import ProviderError
 
 MESSAGES = chat(("What are cats?", "Small mammals."), ("What do cats eat?", "Meat."))
 
@@ -21,15 +23,14 @@ def test_llm_summary_falls_back_on_the_stub_model(client):
     assert "stub" in summary["fallbackReason"].lower()
 
 
-def test_llm_summary_uses_the_model_text_and_caches(client, monkeypatch):
-    from conversation_tree import chatService
+def test_llm_summary_uses_the_model_text_and_caches(client):
     calls = []
 
     def fake(prompt, spec, key=None):
         calls.append((prompt, spec))
         return "  The user asked about cats.  "
 
-    monkeypatch.setattr(chatService, "generateAiText", fake)
+    providers.setReplier(fake)
     conversationId = make(client)
     first = client.post(f"/conversations/{conversationId}/summary/llm", json={"model": "ollama:tiny"}).json()
     assert first["mode"] == "llm" and first["model"] == "ollama:tiny"
@@ -39,12 +40,11 @@ def test_llm_summary_uses_the_model_text_and_caches(client, monkeypatch):
     assert len(calls) == 1, "second identical request should be served from cache"
 
 
-def test_llm_summary_survives_provider_failure(client, monkeypatch):
-    from conversation_tree import chatService
+def test_llm_summary_survives_provider_failure(client):
     def boom(*args, **kwargs):
-        raise RuntimeError("provider down")
+        raise ProviderError("provider down")
 
-    monkeypatch.setattr(chatService, "generateAiText", boom)
+    providers.setReplier(boom)
     summary = client.post(f"/conversations/{make(client)}/summary/llm", json={"model": "ollama:tiny"}).json()
     assert summary["mode"] == "structured-local"
     assert "provider down" in summary["fallbackReason"]

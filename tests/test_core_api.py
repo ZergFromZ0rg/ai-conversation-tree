@@ -5,7 +5,7 @@ import json
 import httpx
 import pytest
 
-from conversation_tree import chatService
+from conversation_tree import chatService, providers
 def newConversation(client, title=None, model=None):
     body = {"title": title, "model": model}
     response = client.post("/conversations", json=body)
@@ -175,7 +175,7 @@ def test_provider_failure_is_a_502_and_a_stray_runtime_error_is_not(client, monk
     def unreachable(*_args, **_kwargs):
         raise httpx.ConnectError("connection refused")
 
-    monkeypatch.setattr(chatService, "generateOllamaText", unreachable)
+    monkeypatch.setattr(providers, "generateOllamaText", unreachable)
     response = client.post(f"/conversations/{conversationId}/turns", json={"userText": "hi", "model": "ollama:tiny"})
     assert response.status_code == 502
     assert response.json()["detail"] == "Model provider error: connection refused"

@@ -17,7 +17,7 @@ import asyncio
 import httpx
 
 import conversation_tree
-from conversation_tree import Settings, api
+from conversation_tree import Settings, api, providers
 from conversation_tree.db import listConversations
 from conversation_tree.chatService import deleteConversationSession
 
@@ -26,6 +26,14 @@ from conversation_tree.chatService import deleteConversationSession
 def configured():
     """The package's settings for the whole run (a throwaway database)."""
     return conversation_tree.init(Settings(dbPath=Path(tempfile.mkdtemp(prefix="act-tests-")) / "test.db"))
+
+
+@pytest.fixture(autouse=True)
+def _builtinReplier():
+    """Tests may install their own replier; each test starts and ends on the built-in one."""
+    providers.setReplier(None)
+    yield
+    providers.setReplier(None)
 
 
 @pytest.fixture()

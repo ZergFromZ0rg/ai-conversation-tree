@@ -20,16 +20,13 @@ from .chatService import (
     createManualConceptLink,
     deleteConversationSession,
     getConversationSession,
-    listAvailableModels,
     listConceptGraph,
     listConversationConceptLinks,
     listConversationGraph,
     listConversationSessions,
     listConversationTurns,
-    listOllamaLibrary,
     patchConversationEdge,
     processChatMessage,
-    pullOllamaModel,
     removeConceptLink,
     removeConversationEdge,
     setConversationSessionModel,
@@ -37,7 +34,7 @@ from .chatService import (
 )
 from .conceptIndex import relinkAllConceptLinks
 from .config import Settings
-from .conversationErrors import InvalidInputError, NotFoundError, ProviderError
+from .conversationErrors import ConflictError, InvalidInputError, NotFoundError, ProviderError
 from .graphService import analyzeImmediateRelationship
 from .analysisService import (
     buildConversationReport,
@@ -49,6 +46,7 @@ from .analysisService import (
 from .contextService import buildContextHealth
 from .ingestService import ingestConversation
 from .lifecycle import init, warmup
+from .providers import Replier, listAvailableModels, listOllamaLibrary, pullOllamaModel
 
 
 frontendDistDir = Path(__file__).resolve().parent.parent / "frontend" / "dist"
@@ -93,6 +91,10 @@ async def handleNotFound(request: Request, error: NotFoundError):
 
 async def handleInvalidInput(request: Request, error: InvalidInputError):
     return JSONResponse({"detail": str(error)}, status_code=status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+
+async def handleConflict(request: Request, error: ConflictError):
+    return JSONResponse({"detail": str(error)}, status_code=status.HTTP_409_CONFLICT)
 
 
 async def handleProviderError(request: Request, error: ProviderError):
@@ -419,8 +421,13 @@ def debugImmediate(req: ImmediateDebugRequest):
     )
 
 
-def createApp(settings: Settings | None = None, options: ServerOptions | None = None) -> FastAPI:
-    """Build the HTTP app. Both arguments default to the environment.
+def createApp(
+    settings: Settings | None = None,
+    options: ServerOptions | None = None,
+    replier: Replier | None = None,
+) -> FastAPI:
+    """Build the HTTP app. `settings` and `options` default to the environment,
+    `replier` to the built-in providers.
 
     Nothing is configured until the app starts: the lifespan hook calls
     ``init(settings)`` (database) and ``warmup()`` (embedding models). Serve it
@@ -431,7 +438,7 @@ def createApp(settings: Settings | None = None, options: ServerOptions | None = 
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        active = init(settings)
+        active = init(settings, replier=replier)
         logging.getLogger("uvicorn.error").info("conversation_tree database: %s", active.dbPath)
         warmup()
         yield
@@ -471,6 +478,7 @@ def createApp(settings: Settings | None = None, options: ServerOptions | None = 
 
     app.add_exception_handler(NotFoundError, handleNotFound)
     app.add_exception_handler(InvalidInputError, handleInvalidInput)
+    app.add_exception_handler(ConflictError, handleConflict)
     app.add_exception_handler(ProviderError, handleProviderError)
     app.include_router(router)
     return app

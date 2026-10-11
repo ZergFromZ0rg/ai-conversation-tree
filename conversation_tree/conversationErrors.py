@@ -20,6 +20,10 @@ class InvalidInputError(ConversationTreeError, ValueError):
     """The request is well-formed but breaks a domain rule (bad label, bad range)."""
 
 
+class ConflictError(ConversationTreeError):
+    """The write collides with something that already exists (a duplicate import)."""
+
+
 class ProviderError(ConversationTreeError, RuntimeError):
     """The model provider failed, is unreachable, or is not configured."""
 

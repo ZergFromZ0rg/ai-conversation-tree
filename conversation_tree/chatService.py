@@ -1,10 +1,4 @@
 from datetime import datetime
-import functools
-import inspect
-import json
-import os
-import time
-import httpx
 
 from .conversationErrors import InvalidInputError, NotFoundError, ProviderError
 from .db import (
@@ -38,35 +32,12 @@ from .conceptIndex import (
 )
 from .graphService import addTurn, reclassifyTurns
 from .graphStore import invalidate, lockedGraph
+from .providers import getReplier, requireValidModelSpec
 
 EDGE_LABELS = ("continuation", "branch", "related")
 CONCEPT_LINK_KINDS = ("same", "related")
-MODEL_SPEC_HINT = "model must be 'stub', 'ollama:<name>', 'openai:<name>', 'anthropic:<name>', or 'gemini:<name>'."
 
 
-def _translatesTransportErrors(function):
-    """Raise ProviderError for any httpx failure inside `function`, so callers
-    never need to know which HTTP client the providers use. Works for plain
-    functions and for generators (errors that surface mid-stream)."""
-    if inspect.isgeneratorfunction(function):
-
-        @functools.wraps(function)
-        def streaming(*args, **kwargs):
-            try:
-                yield from function(*args, **kwargs)
-            except httpx.HTTPError as error:
-                raise ProviderError(str(error)) from error
-
-        return streaming
-
-    @functools.wraps(function)
-    def blocking(*args, **kwargs):
-        try:
-            return function(*args, **kwargs)
-        except httpx.HTTPError as error:
-            raise ProviderError(str(error)) from error
-
-    return blocking
 
 
 def serializeGraphNode(nodeId: int, userText: str, aiText: str, conceptIds: list[int], root: bool, timelineParent: int | None) -> dict:
@@ -125,427 +96,6 @@ def buildGraphPayloadFromStoredTurns(conversationId: int, storedTurns: list[dict
     }
 
 
-def extractResponseText(responseBody: dict) -> str:
-    outputItems = responseBody.get("output", [])
-    textParts: list[str] = []
-
-    for outputItem in outputItems:
-        for contentItem in outputItem.get("content", []):
-            if contentItem.get("type") == "output_text":
-                textParts.append(contentItem.get("text", ""))
-
-    return "\n".join(part for part in textParts if part).strip()
-
-
-def extractOllamaText(responseBody: dict) -> str:
-    message = responseBody.get("message") or {}
-    content = message.get("content", "")
-    if isinstance(content, str):
-        return content.strip()
-    return ""
-
-
-KNOWN_PROVIDERS = ("ollama", "openai", "anthropic", "gemini", "stub")
-
-
-def parseModelSpec(modelSpec: str | None) -> tuple[str | None, str | None]:
-    """Split "provider:model" into (provider, model).
-
-    Ollama tags contain colons ("llama3:8b"), so only the first colon is a
-    separator. "stub" and a bare provider yield model=None. A falsy spec yields
-    (None, None) -> fall back to the environment-configured provider.
-    """
-    if not modelSpec:
-        return None, None
-    provider, _, model = modelSpec.partition(":")
-    return provider, (model or None)
-
-
-def ollamaBaseUrl() -> str:
-    return os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-
-
-def generateOllamaText(userText: str, model: str) -> str:
-    response = httpx.post(
-        f"{ollamaBaseUrl()}/api/chat",
-        json={
-            "model": model,
-            "messages": [{"role": "user", "content": userText}],
-            "stream": False,
-        },
-        timeout=60.0,
-    )
-    response.raise_for_status()
-    aiText = extractOllamaText(response.json())
-    if not aiText:
-        raise ProviderError("Ollama returned no text output.")
-    return aiText
-
-
-def generateOpenAiText(userText: str, model: str, apiKey: str | None = None) -> str:
-    apiKey = apiKey or os.environ.get("OPENAI_API_KEY")
-    if not apiKey:
-        raise ProviderError("OPENAI_API_KEY is not set.")
-    response = httpx.post(
-        "https://api.openai.com/v1/responses",
-        headers={
-            "Authorization": f"Bearer {apiKey}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "input": [
-                {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": userText}],
-                }
-            ],
-        },
-        timeout=60.0,
-    )
-    response.raise_for_status()
-    aiText = extractResponseText(response.json())
-    if not aiText:
-        raise ProviderError("LLM returned no text output.")
-    return aiText
-
-
-def generateOpenAiTextStream(userText: str, model: str, apiKey: str | None = None):
-    """Yield text deltas from the OpenAI Responses SSE stream."""
-    apiKey = apiKey or os.environ.get("OPENAI_API_KEY")
-    if not apiKey:
-        raise ProviderError("OPENAI_API_KEY is not set.")
-    with httpx.stream(
-        "POST",
-        "https://api.openai.com/v1/responses",
-        headers={
-            "Authorization": f"Bearer {apiKey}",
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-        },
-        json={
-            "model": model,
-            "input": [{"role": "user", "content": [{"type": "input_text", "text": userText}]}],
-            "stream": True,
-        },
-        timeout=60.0,
-    ) as response:
-        response.raise_for_status()
-        for line in response.iter_lines():
-            if not line or not line.startswith("data:"):
-                continue
-            payload = line[len("data:") :].strip()
-            if payload == "[DONE]":
-                break
-            event = json.loads(payload)
-            if event.get("type") == "response.output_text.delta" and event.get("delta"):
-                yield event["delta"]
-            if event.get("type") == "response.completed":
-                break
-
-
-anthropicApiVersion = "2023-06-01"
-
-
-def extractAnthropicText(responseBody: dict) -> str:
-    blocks = responseBody.get("content", [])
-    return "\n".join(
-        block.get("text", "") for block in blocks if block.get("type") == "text"
-    ).strip()
-
-
-def generateAnthropicText(userText: str, model: str, apiKey: str | None = None) -> str:
-    apiKey = apiKey or os.environ.get("ANTHROPIC_API_KEY")
-    if not apiKey:
-        raise ProviderError("ANTHROPIC_API_KEY is not set.")
-    response = httpx.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": apiKey,
-            "anthropic-version": anthropicApiVersion,
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "max_tokens": 1024,
-            "messages": [{"role": "user", "content": userText}],
-        },
-        timeout=60.0,
-    )
-    response.raise_for_status()
-    aiText = extractAnthropicText(response.json())
-    if not aiText:
-        raise ProviderError("LLM returned no text output.")
-    return aiText
-
-
-def extractGeminiText(responseBody: dict) -> str:
-    candidates = responseBody.get("candidates", [])
-    if not candidates:
-        return ""
-    parts = (candidates[0].get("content") or {}).get("parts", [])
-    return "\n".join(part.get("text", "") for part in parts).strip()
-
-
-def generateGeminiText(userText: str, model: str, apiKey: str | None = None) -> str:
-    apiKey = apiKey or os.environ.get("GEMINI_API_KEY")
-    if not apiKey:
-        raise ProviderError("GEMINI_API_KEY is not set.")
-    response = httpx.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-        params={"key": apiKey},
-        json={"contents": [{"parts": [{"text": userText}]}]},
-        timeout=60.0,
-    )
-    response.raise_for_status()
-    aiText = extractGeminiText(response.json())
-    if not aiText:
-        raise ProviderError("LLM returned no text output.")
-    return aiText
-
-
-def envDefaultModelSpec() -> str:
-    """The model spec that matches the current environment-based routing."""
-    ollamaModelName = os.environ.get("OLLAMA_MODEL")
-    if ollamaModelName:
-        return f"ollama:{ollamaModelName}"
-    if os.environ.get("AI_CONVERSATION_TREE_STUB_LLM", "1") == "1":
-        return "stub"
-    if os.environ.get("OPENAI_API_KEY"):
-        return f"openai:{os.environ.get('OPENAI_MODEL', 'gpt-5-mini')}"
-    return "stub"
-
-
-@_translatesTransportErrors
-def generateAiText(userText: str, modelSpec: str | None = None, apiKey: str | None = None) -> str:
-    provider, model = parseModelSpec(modelSpec or envDefaultModelSpec())
-
-    if provider == "stub":
-        return f"Stub LLM response for: {userText}"
-    if provider == "ollama":
-        if not model:
-            raise ProviderError("An ollama model spec needs a model name, e.g. 'ollama:llama3'.")
-        return generateOllamaText(userText, model)
-    if provider == "openai":
-        return generateOpenAiText(userText, model or os.environ.get("OPENAI_MODEL", "gpt-5-mini"), apiKey)
-    if provider == "anthropic":
-        if not model:
-            raise ProviderError("An anthropic model spec needs a model name, e.g. 'anthropic:claude-sonnet-5'.")
-        return generateAnthropicText(userText, model, apiKey)
-    if provider == "gemini":
-        if not model:
-            raise ProviderError("A gemini model spec needs a model name, e.g. 'gemini:gemini-2.5-flash'.")
-        return generateGeminiText(userText, model, apiKey)
-    raise ProviderError(f"Unknown model provider: {provider!r}. Expected one of {list(KNOWN_PROVIDERS)}.")
-
-
-# ---- streaming ----
-# Splits a reply into incremental text chunks as it's generated, instead of
-# waiting for the whole thing. Classification still needs the complete text
-# (it embeds userText + " " + aiText), so streaming only changes what the
-# composer shows while the reply is in flight — persistence happens the same
-# way afterward, once the stream ends (see streamChatMessage).
-
-stubStreamWordsPerChunk = 3
-stubStreamDelaySeconds = 0.05
-
-
-def _streamStubText(userText: str):
-    words = f"Stub LLM response for: {userText}".split(" ")
-    for index in range(0, len(words), stubStreamWordsPerChunk):
-        chunk = " ".join(words[index : index + stubStreamWordsPerChunk])
-        if index > 0:
-            chunk = " " + chunk
-        time.sleep(stubStreamDelaySeconds)  # otherwise a local stub reply streams instantly
-        yield chunk
-
-
-def generateOllamaTextStream(userText: str, model: str):
-    with httpx.stream(
-        "POST",
-        f"{ollamaBaseUrl()}/api/chat",
-        json={
-            "model": model,
-            "messages": [{"role": "user", "content": userText}],
-            "stream": True,
-        },
-        timeout=60.0,
-    ) as response:
-        response.raise_for_status()
-        for line in response.iter_lines():
-            if not line:
-                continue
-            chunk = json.loads(line)
-            content = (chunk.get("message") or {}).get("content", "")
-            if content:
-                yield content
-            if chunk.get("done"):
-                break
-
-
-def generateAnthropicTextStream(userText: str, model: str, apiKey: str | None = None):
-    apiKey = apiKey or os.environ.get("ANTHROPIC_API_KEY")
-    if not apiKey:
-        raise ProviderError("ANTHROPIC_API_KEY is not set.")
-    with httpx.stream(
-        "POST",
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": apiKey,
-            "anthropic-version": anthropicApiVersion,
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "max_tokens": 1024,
-            "messages": [{"role": "user", "content": userText}],
-            "stream": True,
-        },
-        timeout=60.0,
-    ) as response:
-        response.raise_for_status()
-        for line in response.iter_lines():
-            if not line or not line.startswith("data:"):
-                continue
-            event = json.loads(line[len("data:") :].strip())
-            if event.get("type") == "content_block_delta":
-                text = (event.get("delta") or {}).get("text", "")
-                if text:
-                    yield text
-
-
-@_translatesTransportErrors
-def streamAiText(userText: str, modelSpec: str | None = None, apiKey: str | None = None):
-    """Yield a reply as it's generated. Same provider routing as generateAiText.
-
-    Gemini's `streamGenerateContent` (a JSON array, not line-delimited) still
-    falls back to the blocking call; OpenAI and Ollama use their native SSE or
-    NDJSON streams.
-    """
-    provider, model = parseModelSpec(modelSpec or envDefaultModelSpec())
-
-    if provider == "stub":
-        yield from _streamStubText(userText)
-        return
-    if provider == "ollama":
-        if not model:
-            raise ProviderError("An ollama model spec needs a model name, e.g. 'ollama:llama3'.")
-        yield from generateOllamaTextStream(userText, model)
-        return
-    if provider == "openai":
-        yield from generateOpenAiTextStream(
-            userText, model or os.environ.get("OPENAI_MODEL", "gpt-5-mini"), apiKey
-        )
-        return
-    if provider == "anthropic":
-        if not model:
-            raise ProviderError("An anthropic model spec needs a model name, e.g. 'anthropic:claude-sonnet-5'.")
-        yield from generateAnthropicTextStream(userText, model, apiKey)
-        return
-    if provider == "gemini":
-        if not model:
-            raise ProviderError("A gemini model spec needs a model name, e.g. 'gemini:gemini-2.5-flash'.")
-        yield generateGeminiText(userText, model, apiKey)
-        return
-    raise ProviderError(f"Unknown model provider: {provider!r}. Expected one of {list(KNOWN_PROVIDERS)}.")
-
-
-# A small curated set of models worth offering as one-click downloads —
-# Ollama has no API for browsing its library, only for pulling a name you
-# already know, so this is a hand-picked list rather than something fetched.
-OLLAMA_LIBRARY = [
-    {"name": "llama3.2:1b", "sizeLabel": "~1.3 GB"},
-    {"name": "llama3.2:3b", "sizeLabel": "~2.0 GB"},
-    {"name": "qwen2.5:1.5b", "sizeLabel": "~1.0 GB"},
-    {"name": "qwen2.5:3b", "sizeLabel": "~1.9 GB"},
-    {"name": "phi3:mini", "sizeLabel": "~2.3 GB"},
-    {"name": "gemma2:2b", "sizeLabel": "~1.6 GB"},
-    {"name": "mistral:7b", "sizeLabel": "~4.1 GB"},
-]
-
-
-def listOllamaLibrary() -> dict:
-    installed = set()
-    ollamaReachable = False
-    try:
-        response = httpx.get(f"{ollamaBaseUrl()}/api/tags", timeout=2.0)
-        response.raise_for_status()
-        ollamaReachable = True
-        installed = {entry.get("name") for entry in response.json().get("models", [])}
-    except Exception:
-        pass
-
-    return {
-        "ollamaReachable": ollamaReachable,
-        "models": [entry for entry in OLLAMA_LIBRARY if entry["name"] not in installed],
-    }
-
-
-@_translatesTransportErrors
-def pullOllamaModel(model: str):
-    """Yield Ollama's own pull progress lines as {"status", "completed", "total"}
-    dicts, straight through — Ollama already reports exactly what a progress
-    bar needs (bytes completed/total per layer) so there's nothing to compute,
-    just forward each NDJSON line as it arrives."""
-    with httpx.stream(
-        "POST",
-        f"{ollamaBaseUrl()}/api/pull",
-        json={"model": model, "stream": True},
-        timeout=None,
-    ) as response:
-        response.raise_for_status()
-        for line in response.iter_lines():
-            if not line:
-                continue
-            chunk = json.loads(line)
-            yield {
-                "status": chunk.get("status", ""),
-                "completed": chunk.get("completed"),
-                "total": chunk.get("total"),
-            }
-            if chunk.get("status") == "success":
-                break
-
-
-def listAvailableModels() -> dict:
-    options: list[dict] = []
-
-    ollamaReachable = False
-    try:
-        response = httpx.get(f"{ollamaBaseUrl()}/api/tags", timeout=2.0)
-        response.raise_for_status()
-        ollamaReachable = True
-        for entry in sorted(response.json().get("models", []), key=lambda m: m.get("name", "")):
-            name = entry.get("name")
-            if name:
-                options.append({"id": f"ollama:{name}", "label": name, "provider": "ollama"})
-    except Exception:
-        pass
-
-    if os.environ.get("OPENAI_API_KEY"):
-        openAiModel = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
-        options.append(
-            {"id": f"openai:{openAiModel}", "label": f"OpenAI · {openAiModel}", "provider": "openai"}
-        )
-
-    stubEnabled = os.environ.get("AI_CONVERSATION_TREE_STUB_LLM", "1") == "1"
-    if stubEnabled or not options:
-        options.append({"id": "stub", "label": "Stub (canned replies)", "provider": "stub"})
-
-    return {
-        "models": options,
-        "default": envDefaultModelSpec(),
-        "ollamaReachable": ollamaReachable,
-    }
-
-
-def isValidModelSpec(modelSpec: str) -> bool:
-    provider, model = parseModelSpec(modelSpec)
-    if provider not in KNOWN_PROVIDERS:
-        return False
-    if provider in ("ollama", "openai", "anthropic", "gemini") and not model:
-        return False
-    return True
 
 
 def serializeStoredTurns(storedTurns: list[dict]) -> list[dict]:
@@ -591,10 +141,6 @@ def persistGraphTurn(conversationId: int, turn) -> None:
     )
 
 
-def requireValidModelSpec(model: str | None) -> None:
-    """None means "use the default"; anything else must be a well-formed spec."""
-    if model is not None and not isValidModelSpec(model):
-        raise InvalidInputError(MODEL_SPEC_HINT)
 
 
 def _requireConversation(conversationId: int) -> dict:
@@ -776,7 +322,7 @@ def removeConceptLink(linkId: int) -> None:
 conversationTitleMaxChars = 60
 
 
-def _titleFromText(text: str) -> str:
+def titleFromText(text: str) -> str:
     """First user message, collapsed and trimmed to a word boundary."""
     collapsed = " ".join(text.split())
     if len(collapsed) <= conversationTitleMaxChars:
@@ -792,8 +338,8 @@ def _prepareTurn(conversationId: int, userText: str, model: str | None) -> str |
 
     Then pick the model: an explicit one on the request wins and becomes the
     conversation's default; otherwise fall back to the conversation's stored
-    choice, then to the environment-configured provider (generateAiText /
-    streamAiText's own fallback when this returns None)."""
+    choice, then to the replier's own default (what the replier does when this
+    returns None)."""
     if not userText:
         raise InvalidInputError("userText must not be empty.")
     conversation = _requireConversation(conversationId)
@@ -801,6 +347,24 @@ def _prepareTurn(conversationId: int, userText: str, model: str | None) -> str |
     if model and conversation.get("model") != model:
         setConversationModel(conversationId, model)
     return model or conversation.get("model")
+
+
+def appendTurn(conversationId: int, userText: str, aiText: str) -> dict:
+    """Record a finished exchange in a conversation.
+
+    The entry point for a host that produces replies itself: classify the turn
+    against the conversation's earlier ones, persist it, title the conversation
+    from its first question, and refresh cross-chat concept links. Returns the
+    payload ``processChatMessage`` returns (``turnId``, ``aiText``, ``turns``,
+    ``nodes``, ``edges``). Raises NotFoundError for an unknown conversation and
+    InvalidInputError for empty text.
+    """
+    if not userText:
+        raise InvalidInputError("userText must not be empty.")
+    if not aiText:
+        raise InvalidInputError("aiText must not be empty.")
+    _requireConversation(conversationId)
+    return _finalizeTurn(conversationId, userText, aiText)
 
 
 def _finalizeTurn(conversationId: int, userText: str, aiText: str) -> dict:
@@ -817,7 +381,7 @@ def _finalizeTurn(conversationId: int, userText: str, aiText: str) -> dict:
     # This conversation's very first turn: title it from the question, unless
     # it was already given a title (e.g. POST /conversations {"title": ...}).
     if turn.timelineParent is None and not (conversation or {}).get("title"):
-        setConversationTitle(conversationId, _titleFromText(userText))
+        setConversationTitle(conversationId, titleFromText(userText))
 
     # Outside the lock: refresh this conversation's cross-chat concept links
     # (debounced, best-effort — never fails the turn).
@@ -834,7 +398,7 @@ def processChatMessage(
     modelSpec = _prepareTurn(conversationId, userText, model)
     # Generate the AI reply before taking the lock so the (potentially slow) LLM
     # call does not serialize other work on this conversation's graph.
-    aiText = generateAiText(userText, modelSpec, apiKey)
+    aiText = getReplier().generate(userText, modelSpec, apiKey)
     return _finalizeTurn(conversationId, userText, aiText)
 
 
@@ -858,7 +422,7 @@ def streamChatMessage(conversationId: int, userText: str, model: str | None = No
 
 def _streamTurnEvents(conversationId: int, userText: str, modelSpec: str | None, apiKey: str | None):
     chunks: list[str] = []
-    for chunk in streamAiText(userText, modelSpec, apiKey):
+    for chunk in getReplier().stream(userText, modelSpec, apiKey):
         chunks.append(chunk)
         yield {"type": "delta", "text": chunk}
 

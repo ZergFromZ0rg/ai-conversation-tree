@@ -5,7 +5,8 @@ FastAPI app (a CLI, another application) relies on."""
 import httpx
 import pytest
 
-from conversation_tree import chatService
+from conversation_tree import providers
+from conversation_tree.providers import generateAiText, streamAiText
 from conversation_tree.analysisService import buildConversationReport, buildConversationSummary, buildLlmSummary, searchConversations
 from conversation_tree.chatService import (
     analyzeConversation,
@@ -13,7 +14,6 @@ from conversation_tree.chatService import (
     createConversationSession,
     createManualConceptLink,
     deleteConversationSession,
-    generateAiText,
     getConversationSession,
     listConversationGraph,
     listConversationTurns,
@@ -22,7 +22,6 @@ from conversation_tree.chatService import (
     removeConceptLink,
     removeConversationEdge,
     setConversationSessionModel,
-    streamAiText,
     streamChatMessage,
 )
 from conversation_tree.contextService import buildContextHealth
@@ -176,7 +175,7 @@ def test_stream_rejects_a_bad_request_at_call_time_not_on_iteration(client, conv
 
 
 def test_stream_yields_deltas_then_done(client, conversationId, monkeypatch):
-    monkeypatch.setattr(chatService, "stubStreamDelaySeconds", 0)
+    monkeypatch.setattr(providers, "stubStreamDelaySeconds", 0)
     events = list(streamChatMessage(conversationId, "What do dogs eat?"))
     assert [event["type"] for event in events[:-1]] == ["delta"] * (len(events) - 1)
     assert events[-1]["type"] == "done"
@@ -194,8 +193,8 @@ def test_transport_errors_become_provider_errors(client, monkeypatch):
     def unreachable(*_args, **_kwargs):
         raise httpx.ConnectError("connection refused")
 
-    monkeypatch.setattr(chatService, "generateOllamaText", unreachable)
-    monkeypatch.setattr(chatService, "generateOllamaTextStream", unreachable)
+    monkeypatch.setattr(providers, "generateOllamaText", unreachable)
+    monkeypatch.setattr(providers, "generateOllamaTextStream", unreachable)
     with pytest.raises(ProviderError, match="connection refused") as raised:
         generateAiText("hi", "ollama:tiny")
     assert isinstance(raised.value.__cause__, httpx.ConnectError)

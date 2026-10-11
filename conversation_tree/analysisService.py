@@ -15,6 +15,7 @@ from .db import (
     listConversationEdges,
 )
 from .graphService import encodeText
+from .providers import STUB_MODEL_SPEC, getReplier, requireValidModelSpec
 from .vectorStore import searchWorkspace
 
 _wordPattern = re.compile(r"[a-z0-9][a-z0-9'_-]{1,}", re.IGNORECASE)
@@ -195,26 +196,25 @@ def buildLlmSummary(conversationId: int, model: str | None = None, apiKey: str |
     always gets a usable summary. Raises InvalidInputError for a malformed
     model spec and NotFoundError for an unknown conversation.
     """
-    from .chatService import envDefaultModelSpec, generateAiText, requireValidModelSpec
-
     requireValidModelSpec(model)
+    replier = getReplier()
     base = buildConversationSummary(conversationId)
     if base["turnCount"] == 0:
         return base
     conversation = getConversation(conversationId)
-    modelSpec = model or (conversation or {}).get("model") or envDefaultModelSpec()
-    if modelSpec == "stub":
+    modelSpec = model or (conversation or {}).get("model") or replier.defaultModelSpec()
+    if modelSpec == STUB_MODEL_SPEC:
         return {**base, "fallbackReason": "The stub model can't write summaries; pick a real model."}
 
     turns = getConversationTurns(conversationId)
     lastTurn = turns[-1]
-    cacheKey = (conversationId, len(turns), hash(lastTurn["userText"] + lastTurn["aiText"]), modelSpec)
+    cacheKey = (conversationId, len(turns), hash(lastTurn["userText"] + lastTurn["aiText"]), modelSpec, id(replier))
     cached = _summaryCache.get(cacheKey)
     if cached is not None:
         return cached
 
     try:
-        text = generateAiText(_summaryPrompt + _transcriptForSummary(turns), modelSpec, apiKey).strip()
+        text = replier.generate(_summaryPrompt + _transcriptForSummary(turns), modelSpec, apiKey).strip()
     except Exception as error:  # provider errors vary widely; never fail the panel
         return {**base, "fallbackReason": f"Model call failed: {error}"}
     if not text:

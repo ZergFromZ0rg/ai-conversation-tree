@@ -261,7 +261,11 @@ cheap, the embedding models load when `graphService` is first imported):
 - `conversationErrors.py`
   - the services' error contract (see "Using The Services Directly")
 - `chatService.py`
-  - orchestration, provider calls, graph payload serialization
+  - orchestration (conversations, turns, edges, concept links) and graph payload
+    serialization. `appendTurn` is the entry point for recording a finished exchange
+- `providers.py`
+  - where replies come from: the `Replier` a host can plug in, and the built-in
+    Ollama / OpenAI / Anthropic / Gemini / stub routing behind it
 - `graphService.py`
   - `ConversationGraph` model, classification logic, concept retrieval, reanalysis
 - `conceptIndex.py`
@@ -335,9 +339,10 @@ The HTTP-only options (`AI_CONVERSATION_TREE_API_TOKEN`,
 `AI_CONVERSATION_TREE_CORS_ORIGINS`) live in `api.ServerOptions`, so the logic
 layer never sees them. `createApp(settings, options)` configures the package in
 its startup hook and loads the models before accepting requests; serve it with
-`uvicorn --factory conversation_tree.api:createApp`. Reply-provider settings
-(`OPENAI_API_KEY`, `OLLAMA_BASE_URL`, `AI_CONVERSATION_TREE_STUB_LLM`, …) are
-still read from the environment when a reply is generated.
+`uvicorn --factory conversation_tree.api:createApp`. The built-in reply
+providers (`OPENAI_API_KEY`, `OLLAMA_BASE_URL`, `AI_CONVERSATION_TREE_STUB_LLM`, …)
+read their own settings from the environment when a reply is generated; a host
+that plugs in its own replier (below) never touches them.
 
 The embedding models (`all-MiniLM-L6-v2` and its cross-encoder) are fixed, not
 settings: the classifier thresholds were tuned for them and the pgvector table is
@@ -349,21 +354,61 @@ The HTTP layer is a thin skin. Every rule (label and confidence ranges, edge
 direction, model-spec format, search limits, import sources) is enforced inside
 the service functions, so a caller that is not FastAPI gets the same behaviour.
 Import them from the package (`from conversation_tree import chatService`);
-the HTTP layer is not needed. Failures are signalled with three exceptions
-from `conversationErrors.py`,
-never with `None` / `False` returns or transport errors:
+the HTTP layer is not needed. Failures are signalled with the exceptions in
+`conversationErrors.py`, never with `None` / `False` returns or transport
+errors:
 
 | Exception | Meaning | HTTP | Also a |
 | --- | --- | --- | --- |
 | `NotFoundError` | the conversation, edge, concept, or link doesn't exist | 404 | `LookupError` |
 | `InvalidInputError` | the request breaks a domain rule | 422 | `ValueError` |
 | `ProviderError` | the model provider failed, is unreachable, or isn't configured | 502 | `RuntimeError` |
+| `ConflictError` | a write collides with an existing record (a duplicate import) | 409 | |
+| `NotConfiguredError` | a service ran before `init()` | | `RuntimeError` |
 
 All derive from `ConversationTreeError`. Provider calls translate `httpx`
 errors into `ProviderError`, so callers never depend on the HTTP client.
 `streamChatMessage` validates when it is *called* and raises before returning
 its iterator, so a caller can still reject a bad request before streaming;
 `ProviderError` surfaces while iterating.
+
+**Recording turns you generated yourself.** A host that already has the reply
+(its own chat, its own model call) hands over the finished exchange; nothing is
+generated and no provider is involved:
+
+```python
+from conversation_tree.chatService import appendTurn, createConversationSession
+
+conversationId = createConversationSession()["conversationId"]
+result = appendTurn(conversationId, "What are cats?", "Small carnivorous mammals.")
+result["turnId"], result["edges"]   # the turn is classified, persisted, and linked
+```
+
+`appendTurn` classifies the turn against the conversation's earlier ones,
+persists it, titles the conversation from its first question, and refreshes
+cross-chat concept links, exactly as a turn typed into the viewer would.
+
+**Plugging in your own model layer.** `processChatMessage`,
+`streamChatMessage`, and the model-written summary ask a *replier* for text.
+Pass a plain function, or subclass `providers.Replier` for streaming, model
+validation, and a default model:
+
+```python
+conversation_tree.init(settings, replier=lambda userText, modelSpec, apiKey: myLlm.chat(userText))
+
+class MyReplier(providers.Replier):
+    modelSpecHint = "model must be one of my models."
+    def generate(self, userText, modelSpec=None, apiKey=None): ...
+    def stream(self, userText, modelSpec=None, apiKey=None): ...   # optional
+    def isValidModelSpec(self, modelSpec): ...                     # optional
+    def defaultModelSpec(self): ...                                # optional
+```
+
+An exception from a plain function is reported as `ProviderError`; a subclass
+should raise `ProviderError` itself for failures the caller ought to see as a
+provider problem, and anything else propagates as a bug. The replier receives
+only the latest message, not the conversation history. With no replier the
+built-in providers are used, so the bundled viewer is unchanged.
 
 What stays in `api.py` on purpose: request-shape limits (field lengths, message
 counts) on the Pydantic models, the report's `format` and download filename, and

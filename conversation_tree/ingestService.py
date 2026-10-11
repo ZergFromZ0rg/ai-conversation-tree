@@ -6,12 +6,11 @@ into turns, matched to an earlier import of the same chat by
 re-syncing a chat that grew by a few messages costs a few turns, not a rebuild.
 """
 
-import sqlite3
 from datetime import datetime
 
-from .chatService import _titleFromText, persistGraphTurn
+from .chatService import titleFromText, persistGraphTurn
 from .conceptIndex import maybeRelinkConcepts
-from .conversationErrors import InvalidInputError
+from .conversationErrors import ConflictError, InvalidInputError
 from .db import (
     clearConversationTurns,
     createConversation,
@@ -106,7 +105,7 @@ def ingestConversation(
     if created:
         try:
             conversationId = createConversation(cleanTitle, source, externalId, url)
-        except sqlite3.IntegrityError:
+        except ConflictError:
             # A concurrent sync of the same new chat (auto-sync racing the
             # popup button) created it first; join that conversation.
             existing = findConversationBySource(source, externalId)
@@ -136,7 +135,7 @@ def ingestConversation(
     invalidate(conversationId)
 
     if created and not cleanTitle:
-        setConversationTitle(conversationId, _titleFromText(incoming[0][0]))
+        setConversationTitle(conversationId, titleFromText(incoming[0][0]))
 
     if addedTurns:
         maybeRelinkConcepts(conversationId, force=True)
