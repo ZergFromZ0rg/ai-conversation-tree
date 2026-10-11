@@ -351,9 +351,13 @@ conversation_tree.init(Settings(dbPath="/var/lib/myapp/conversations.db"))
 conversation_tree.warmup()   # optional: load the embedding models now, not on first use
 ```
 
-`init()` creates the database (idempotent) and drops any state tied to a
-previous configuration: the cached graphs, the concept-link timing, cached
-model-written summaries, and the pgvector schema state. Services called before it raise `NotConfiguredError`.
+`Settings` checks itself when it is created: `dbPath` is made absolute (and `~`
+expanded) at that moment, so a host that changes directory later keeps its
+database, and `contextWindowTokens` must be a positive integer. `init()` creates
+the database (idempotent) and drops any state tied to a previous configuration: the cached graphs, the concept-link timing, cached
+model-written summaries, and the pgvector schema state. It is all-or-nothing:
+if the settings or the replier are invalid, or the database cannot be opened, it
+raises and the package keeps running exactly as it was configured before. Services called before it raise `NotConfiguredError`.
 `init()` with no argument reads the environment, which is what the bundled app
 does:
 
@@ -426,6 +430,7 @@ class MyReplier(providers.Replier):
     def stream(self, request): ...            # optional
     def isValidModelSpec(self, modelSpec): ...  # optional
     def defaultModelSpec(self): ...           # optional
+    def contextWindowTokens(self, modelSpec): ...  # optional: this model's window, or None
 ```
 
 A `ReplyRequest` carries `userText` (the new message), `modelSpec`, `apiKey`,
@@ -435,10 +440,13 @@ first, as `{"role": "user" | "assistant", "content": "..."}`. Use it as given,
 or ignore it and look the conversation up by `conversationId` in your own store.
 Turns recorded with `appendTurn` count as history like any other.
 
-Only whole turns that fit the context window (`Settings.contextWindowTokens`,
-estimated at four characters per token) are included, newest first, after the
-new message has been charged against it. That is the same window the context
-health panel draws its horizon from, so a turn the panel marks as outside the
+Only whole turns that fit the model's context window are included, newest
+first, after the new message has been charged against it (four characters are
+estimated as one token). The window is `Settings.contextWindowTokens` unless the
+replier reports one for that model with `contextWindowTokens(modelSpec)`; a
+replier serving models with different windows should, and a value that is not a
+positive integer or `None` is an error rather than a silent fallback. That is the same window the context
+health panel draws its horizon from (for the conversation's own model), so a turn the panel marks as outside the
 window is also a turn the model is not sent. The first turn has an empty
 history. A summary request has none either, and `conversationId` is `None`,
 because its prompt already contains the transcript.
@@ -447,7 +455,9 @@ An exception from a plain function is reported as `ProviderError`; a subclass
 should raise `ProviderError` itself for failures the caller ought to see as a
 provider problem, and anything else propagates as a bug. A reply must be real
 text: an empty, whitespace-only, or non-string reply (or stream chunk) is also a
-`ProviderError`, and nothing is recorded. With no replier the
+`ProviderError`, and nothing is recorded. Pass a replier *instance* (`MyReplier()`),
+not the class; the class is refused up front. An explicit model on a request becomes
+the conversation's default only after that turn has succeeded. With no replier the
 built-in providers are used: they send `history` in each provider's own format
 (Ollama, OpenAI, Anthropic, and Gemini; the stub ignores it), so replies from a
 real model see the earlier conversation.
@@ -1089,8 +1099,11 @@ cache):
 
 ```bash
 venv/bin/pip install -r requirements-dev.txt   # or: pip install -e ".[dev]"
-HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 venv/bin/python -m pytest
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 venv/bin/pytest
 ```
+
+`pytest` reads its settings (including the import path, so no install is needed)
+from `pyproject.toml`, which must stay the only pytest config file.
 
 The suite covers ingestion (pairing, idempotent re-sync, append, rebuild,
 validation), context-health scoring, hybrid search, summaries (including
@@ -1164,7 +1177,9 @@ cd frontend && npm run build
   models are fixed rather than configurable
 - the history sent to a model is the whole timeline trimmed by a rough
   characters-per-token estimate, not the semantic thread, and the exact token
-  count of a given model will differ
+  count of a given model will differ; the built-in providers do not know any
+  model's window, so lower `contextWindowTokens` for the smallest model you use
+  or report windows from your own replier
 - the history payloads for OpenAI, Anthropic, and Gemini follow each provider's
   documented format and are tested against the request shapes, but have not been
   exercised against the live APIs
