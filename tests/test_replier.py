@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 import conversation_tree
-from conversation_tree import Settings, api, providers
+from conversation_tree import Settings, api, db, providers
 from conversation_tree.analysisService import buildLlmSummary
 from conversation_tree.chatService import (
     appendTurn,
@@ -88,6 +88,40 @@ def test_a_failing_replier_is_a_502_over_http(client):
     response = client.post(f"/conversations/{conversationId}/turns", json={"userText": "hi"})
     assert response.status_code == 502
     assert response.json()["detail"] == "Model provider error: boom"
+
+
+# --- a reply must be text ----------------------------------------------------
+
+@pytest.mark.parametrize("reply", ["", "   \n", None, 42, ["a list"]])
+def test_a_blank_or_non_text_reply_is_a_provider_error_and_stores_nothing(conversationId, reply):
+    providers.setReplier(lambda request: reply)
+    with pytest.raises(ProviderError, match="no text output"):
+        processChatMessage(conversationId, "hello")
+    assert db.getConversationTurns(conversationId) == [], "no turn may be recorded for a failed reply"
+
+
+@pytest.mark.parametrize("pieces", [[], [""], ["  ", "\n"], [None], ["fine", 7]])
+def test_a_blank_or_non_text_stream_is_a_provider_error_and_stores_nothing(conversationId, pieces):
+    class Pieces(providers.Replier):
+        def generate(self, request):
+            raise AssertionError("streaming only")
+
+        def stream(self, request):
+            yield from pieces
+
+    providers.setReplier(Pieces())
+    with pytest.raises(ProviderError, match="no text output"):
+        list(streamChatMessage(conversationId, "hello"))
+    assert db.getConversationTurns(conversationId) == []
+
+
+def test_an_empty_reply_over_http_is_a_502_not_a_stored_turn(client):
+    providers.setReplier(lambda request: "")
+    conversationId = client.post("/conversations", json={}).json()["conversationId"]
+    response = client.post(f"/conversations/{conversationId}/turns", json={"userText": "hi"})
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Model provider error: Model returned no text output."
+    assert client.get(f"/conversations/{conversationId}/turns").json()["turns"] == []
 
 
 # --- a Replier subclass ----------------------------------------------------

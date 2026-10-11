@@ -394,6 +394,16 @@ def _finalizeTurn(conversationId: int, userText: str, aiText: str) -> dict:
     return payload
 
 
+def _requireReplyText(aiText) -> str:
+    """A reply must be real text. The built-in providers already refuse to return
+    nothing; a plugged-in replier gets the same rule here, so a blank or
+    non-text reply is a provider failure instead of an empty turn that would be
+    stored and then sent back to the model as an empty message."""
+    if not isinstance(aiText, str) or not aiText.strip():
+        raise ProviderError("Model returned no text output.")
+    return aiText
+
+
 def _replyRequest(conversationId: int, userText: str, modelSpec: str | None, apiKey: str | None) -> ReplyRequest:
     """The request for a reply to `userText`: the model, plus as much of the
     conversation so far as fits the context window."""
@@ -409,7 +419,7 @@ def processChatMessage(
     modelSpec = _prepareTurn(conversationId, userText, model)
     # Generate the AI reply before taking the lock so the (potentially slow) LLM
     # call does not serialize other work on this conversation's graph.
-    aiText = getReplier().generate(_replyRequest(conversationId, userText, modelSpec, apiKey))
+    aiText = _requireReplyText(getReplier().generate(_replyRequest(conversationId, userText, modelSpec, apiKey)))
     return _finalizeTurn(conversationId, userText, aiText)
 
 
@@ -435,12 +445,12 @@ def streamChatMessage(conversationId: int, userText: str, model: str | None = No
 def _streamTurnEvents(conversationId: int, userText: str, request: ReplyRequest):
     chunks: list[str] = []
     for chunk in getReplier().stream(request):
+        if not isinstance(chunk, str):
+            raise ProviderError("Model returned no text output.")
         chunks.append(chunk)
         yield {"type": "delta", "text": chunk}
 
-    aiText = "".join(chunks)
-    if not aiText:
-        raise ProviderError("Model returned no text output.")
+    aiText = _requireReplyText("".join(chunks))
 
     payload = _finalizeTurn(conversationId, userText, aiText)
     yield {"type": "done", **payload}
