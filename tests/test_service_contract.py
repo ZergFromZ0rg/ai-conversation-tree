@@ -106,9 +106,12 @@ def test_not_found_takes_precedence_over_a_bad_model(client):
         processChatMessage(MISSING, "hello", "bogus")
 
 
-def test_empty_user_text_is_invalid_input(client, conversationId):
+@pytest.mark.parametrize("blank", ["", "   ", "\n\t "])
+def test_blank_user_text_is_invalid_input(client, conversationId, blank):
     with pytest.raises(InvalidInputError, match="userText"):
-        processChatMessage(conversationId, "")
+        processChatMessage(conversationId, blank)
+    with pytest.raises(InvalidInputError, match="userText"):
+        streamChatMessage(conversationId, blank)
 
 
 # --- edges ----------------------------------------------------------------

@@ -64,6 +64,9 @@ def test_turn_rejects_empty_text_and_unknown_conversation(client):
     conversationId = newConversation(client)
     assert client.post(f"/conversations/{conversationId}/turns", json={"userText": ""}).status_code == 422
     assert client.post("/conversations/9999/turns", json={"userText": "hi"}).status_code == 404
+    for blank in ("   ", "\n"):
+        assert client.post(f"/conversations/{conversationId}/turns", json={"userText": blank}).status_code == 422
+        assert client.post(f"/conversations/{conversationId}/turns/stream", json={"userText": blank}).status_code == 422
 
 
 def test_streaming_turn_emits_deltas_then_done(client):

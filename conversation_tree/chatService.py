@@ -338,6 +338,14 @@ def titleFromText(text: str) -> str:
     return (head or collapsed[:conversationTitleMaxChars].rstrip()) + "…"
 
 
+def _requireText(value, name: str) -> None:
+    """A message must contain something other than whitespace: a blank one would
+    be classified, stored, and (as a first turn) give the conversation an empty
+    title that nothing later replaces."""
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidInputError(f"{name} must not be empty.")
+
+
 class _TurnPlan(NamedTuple):
     modelSpec: str | None
     """The model to ask for; None means the replier's own default."""
@@ -356,8 +364,7 @@ def _prepareTurn(conversationId: int, userText: str, model: str | None) -> _Turn
     explicit model becomes the conversation's default only after the turn has
     succeeded (see ``rememberModel``): a request that fails must leave the
     conversation as it found it."""
-    if not userText:
-        raise InvalidInputError("userText must not be empty.")
+    _requireText(userText, "userText")
     conversation = _requireConversation(conversationId)
     requireValidModelSpec(model)
     remember = model if model and conversation.get("model") != model else None
@@ -374,10 +381,8 @@ def appendTurn(conversationId: int, userText: str, aiText: str) -> dict:
     ``nodes``, ``edges``). Raises NotFoundError for an unknown conversation and
     InvalidInputError for empty text.
     """
-    if not userText:
-        raise InvalidInputError("userText must not be empty.")
-    if not aiText:
-        raise InvalidInputError("aiText must not be empty.")
+    _requireText(userText, "userText")
+    _requireText(aiText, "aiText")
     _requireConversation(conversationId)
     return _finalizeTurn(conversationId, userText, aiText)
 

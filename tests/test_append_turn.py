@@ -69,3 +69,13 @@ def test_creating_a_duplicate_import_is_a_conflict_not_a_storage_error(client):
     assert raised.value.__cause__ is not None
     db.createConversation("t", None, None, None)  # conversations with no source never collide
     db.createConversation("t", None, None, None)
+
+
+@pytest.mark.parametrize("blank", ["", " ", "   \n\t", None, 7])
+def test_blank_or_non_text_messages_are_rejected_on_both_sides(conversationId, blank):
+    with pytest.raises(InvalidInputError, match="userText"):
+        appendTurn(conversationId, blank, "a reply")
+    with pytest.raises(InvalidInputError, match="aiText"):
+        appendTurn(conversationId, "a question", blank)
+    assert db.getConversationTurns(conversationId) == []
+    assert getConversationSession(conversationId)["title"] is None, "no empty title may be set"
