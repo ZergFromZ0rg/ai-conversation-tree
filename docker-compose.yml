@@ -12,7 +12,7 @@ services:
       - "8000:8000"
     environment:
       # Required for anything reachable from the internet. Every API route
-      # (including the extension's ingest endpoint) demands it as a bearer token.
+      # (including the ingest endpoint) demands it as a bearer token.
       AI_CONVERSATION_TREE_API_TOKEN: ${AI_CONVERSATION_TREE_API_TOKEN:?set a token before exposing this}
       # Reply generation: "stub" needs nothing; set one of these to use a real model.
       AI_CONVERSATION_TREE_STUB_LLM: ${AI_CONVERSATION_TREE_STUB_LLM:-1}

@@ -6,8 +6,9 @@ branch, related, or a fresh topic), links concepts that recur across your
 conversations, and warns when a long chat has probably lost its own context.
 
 Chats get in two ways: type into the built-in viewer (local models, OpenAI,
-Anthropic, Gemini, or a stub), or **capture the conversations you already have
-in ChatGPT, Claude, and Gemini with the browser extension**.
+Anthropic, Gemini, or a stub), or **import conversations you already have**
+through the ingest API as role-tagged messages. The logic lives in a plain
+Python backend with a small HTTP surface, so the viewer is optional.
 
 It runs on your machine by default (SQLite, local embedding models, no
 accounts). It is a technically solid, explainable portfolio project, not a
@@ -17,8 +18,8 @@ hosted product — though a Docker setup is included if you want one.
 
 ## Five-Minute Demo
 
-This walks through everything with no API key and no browser extension. It
-loads four chats from three sources the same way the extension would.
+This walks through everything with no API key. It imports four chats from
+three sources through the ingest API.
 
 ```bash
 # 1. backend + viewer (see Local Setup for the one-time install)
@@ -59,10 +60,10 @@ Open <http://127.0.0.1:8000/ui>, then:
 ```mermaid
 flowchart LR
     subgraph sources[Where chats come from]
-        EXT["Browser extension<br/>ChatGPT · Claude · Gemini"]
+        IMP["Imported chats<br/>role-tagged messages"]
         UI["Built-in chat viewer"]
     end
-    EXT -- "POST /ingest/conversations" --> API
+    IMP -- "POST /ingest/conversations" --> API
     UI -- "turns / stream" --> API
     API["FastAPI"] --> CLS["Classifier<br/>embeddings + discourse + cross-encoder"]
     CLS --> DB[("SQLite<br/>turns · edges · concepts · embeddings")]
@@ -264,7 +265,7 @@ Backend:
   - structured and LLM-written summaries, hybrid cross-chat search, and
     Markdown/JSON report generation
 - `ingestService.py`
-  - turns captured role-tagged messages into turns, matches a chat to an
+  - turns imported role-tagged messages into turns, matches a chat to an
     earlier import, and classifies only what is new
 - `contextService.py`
   - context-loss detection (pure scoring function plus a DB wrapper)
@@ -275,7 +276,6 @@ Backend:
 
 Elsewhere:
 
-- `extension/` — the Manifest V3 browser extension and its tests
 - `tests/` — the pytest suite
 - `scripts/seed_demo.py` — loads the demo workspace through the ingest API
 - `Dockerfile`, `docker-compose.yml` — hosted deployment
@@ -303,9 +303,9 @@ as a legacy sample database.
 - `conversations` — `model` column holds the conversation's default response
   model (`stub`, `ollama:<name>`, or `openai:<name>`); null means use the
   environment default. Imported chats also carry `source` (`chatgpt` /
-  `claude` / `gemini`), `externalId` (the site's own conversation id), and
-  `sourceUrl`; `(source, externalId)` is unique, which is how a re-sync finds
-  its conversation
+  `claude` / `gemini` / `other`), `externalId` (the origin system's own
+  conversation id), and `sourceUrl`; `(source, externalId)` is unique, which is
+  how a re-sync finds its conversation
 - `turns`
 - `semanticEdges` — each edge carries an `origin` of `auto` (classifier) or `manual` (hand-created via `POST /edges`)
 - `turnConcepts` — `conceptKey` is a stable per-concept identity carried across
@@ -342,7 +342,7 @@ deliberate, as it is what keeps other workers from serving stale state.
 
 - `POST /conversations` — optional `model` sets the conversation default
 - `GET /conversations` — each entry carries `source` / `sourceUrl` when the
-  chat was imported by the extension (null otherwise)
+  chat was imported (null otherwise)
 - `GET /conversations/{conversationId}`
 - `PATCH /conversations/{conversationId}` — set the conversation's default
   response model (`{"model": "ollama:<name>"}`); validated against the same
@@ -372,10 +372,10 @@ deliberate, as it is what keeps other workers from serving stale state.
 
 ### Ingest Endpoint
 
-- `POST /ingest/conversations` — create or update a conversation captured
-  elsewhere. Body: `{"source": "chatgpt"|"claude"|"gemini"|"other",
+- `POST /ingest/conversations` — create or update a conversation imported
+  from elsewhere. Body: `{"source": "chatgpt"|"claude"|"gemini"|"other",
   "externalId": "...", "title"?, "url"?, "messages": [{"role": "user"|"assistant",
-  "text": "..."}]}`. See "Browser Extension" for the exact semantics. Returns
+  "text": "..."}]}`. See "Importing Conversations" for the exact semantics. Returns
   `{conversationId, created, addedTurns, rebuilt, turnCount}`; `422` if no
   complete user/assistant exchange is present
 
@@ -573,30 +573,12 @@ stream ends, same as the blocking path.
 
 The UI follows the browser's light/dark preference.
 
-## Browser Extension
+## Importing Conversations
 
-`extension/` is a Manifest V3 extension (Chrome and other Chromium browsers)
-that captures the conversation open in a ChatGPT, Claude, or Gemini tab and
-sends it to your server.
-
-**Install**
-
-1. Open `chrome://extensions`, enable *Developer mode*, choose *Load unpacked*,
-   and select the `extension/` folder.
-2. Open a saved conversation on `chatgpt.com`, `claude.ai`, or
-   `gemini.google.com`, click the extension icon, and press *Send this chat to
-   the tree*. The popup reports how many turns were added and links to the
-   conversation in the viewer.
-3. The popup's *Settings* hold the server URL (default
-   `http://127.0.0.1:8000`) and an API token if the server requires one.
-   Pointing it at a non-local server asks Chrome for permission to reach that
-   origin. *Sync automatically after each reply* is off by default; when on,
-   the extension syncs once the page has been quiet for five seconds and no
-   reply is streaming.
-
-**What gets sent.** Only the messages of the tab you act on (or, with auto-sync
-on, of supported chat pages), only to the server URL you configured. Nothing is
-sent until you click the button or enable auto-sync.
+`POST /ingest/conversations` takes a chat that already exists somewhere else (a
+data export, another app, a script) as a flat list of role-tagged messages and
+runs it through the same pipeline as a typed chat. `scripts/seed_demo.py` is a
+working example client.
 
 **Ingestion semantics** (`ingestService.py`)
 
@@ -614,18 +596,6 @@ sent until you click the button or enable auto-sync.
   cross-chat linking as typed ones, so they show up in the graph, the map,
   search, and context-health immediately. Classifying on CPU takes roughly a
   second or two per turn.
-
-**Fragile by nature.** The extractors read each site's DOM, and those sites
-change their markup without notice. The selectors live in one table at the top
-of `extension/src/extract.js` (several fallbacks per role). The extractor is
-unit-tested against fixture HTML for all three sites, but **the fixtures are
-hand-written approximations of each site's structure, not captures of the live
-pages** — if a site ships a redesign the popup says "layout may have changed"
-and that table is the one place to update.
-
-```bash
-cd extension && npm install && npm test   # extractor tests (jsdom)
-```
 
 ## Search
 
@@ -667,7 +637,7 @@ signals indicate *risk*, not proof — a repeated question can be deliberate.
 
 ## Hosted Deployment
 
-For an always-on server (so the extension can sync from any machine):
+For an always-on server (so chats can be imported and viewed from any machine):
 
 ```bash
 export AI_CONVERSATION_TREE_API_TOKEN=$(openssl rand -hex 24)
@@ -680,12 +650,12 @@ docker compose up -d --build
   `Authorization: Bearer <token>` — including `/ingest/conversations`. The
   viewer shell (`/ui`, `/assets`), `/healthz`, and `/` stay public so the page
   can load; the viewer asks for the token in *Settings* after its first `401`.
-  The extension has a matching field. Compose refuses to start without a token.
+  Compose refuses to start without a token.
 - **Put TLS in front** (Caddy, nginx, a cloud load balancer). The token is a
   header; it must not cross the network in clear text.
 - `AI_CONVERSATION_TREE_CORS_ORIGINS` adds browser origins (comma-separated)
-  for a viewer served from a different domain; extension origins are always
-  allowed.
+  for a viewer served from a different domain; the Vite dev server origins
+  are always allowed.
 - Reply generation: stub by default; set `OPENAI_API_KEY` for OpenAI. Provider
   keys entered in the viewer's Settings stay in that browser and are forwarded
   per request, as locally.
@@ -789,8 +759,7 @@ npm run dev   # http://127.0.0.1:5173, proxies /conversations /edges /models /co
 
 Typical workflow:
 
-1. start a new chat — or capture existing ChatGPT / Claude / Gemini chats with
-   the browser extension
+1. start a new chat — or import an existing one through `/ingest/conversations`
 2. send turns through the UI or API
 3. open the graph drawer to see how the turns relate
 4. hit `Reanalyze` after changing classifier logic
@@ -837,7 +806,7 @@ curl -N -X POST http://127.0.0.1:8000/conversations/1/turns/stream \
 `-N` disables curl's output buffering so the `delta` events print as they
 arrive instead of all at once at the end.
 
-### Import a captured chat (what the extension sends)
+### Import an existing chat
 
 ```bash
 curl -X POST http://127.0.0.1:8000/ingest/conversations \
@@ -892,8 +861,7 @@ provider failure), API-token auth and CORS (a 401 still carries CORS headers), a
 report / concept-link endpoints, plus regressions for atomic turn writes, cache
 recovery after a failed write, concurrent first syncs, and stale pgvector rows.
 Each test runs against a throwaway database.
-The classifier is graded separately by the eval scripts below, and the extension
-extractors by `npm test` in `extension/`.
+The classifier is graded separately by the eval scripts below.
 
 Lint (unused imports / names):
 
@@ -942,8 +910,6 @@ cd frontend && npm run build
 - Gemini replies currently fall back to one chunk; its streaming JSON protocol
   is not yet implemented
 - auth is one shared token: no accounts, per-user isolation, or rate limiting
-- the extension's DOM selectors need maintenance as the chat sites change, and
-  they have been verified against fixture HTML, not the live sites
 - context-loss detection is heuristic (it flags risk from repeated questions,
   "as I said" callbacks, and long-range dependencies); it does not read
   anything the model actually saw
@@ -964,20 +930,6 @@ Next:
   contradicts an earlier answer (needs a model or NLI pass)
 - summaries that cover each thread rather than the whole chat
 - search filters by source and date
-
-### Browser Extension
-
-Implemented: capture for ChatGPT, Claude, and Gemini, idempotent incremental
-sync, optional auto-sync, token auth.
-
-Next:
-
-- inject the graph as a side panel on the chat site itself, instead of the
-  separate viewer tab
-- Firefox build (the manifest is close; the service worker needs a background
-  script shim)
-- background (queued) ingestion so long first syncs return immediately
-- live-site selector verification in CI
 
 ### Postgres + pgvector
 

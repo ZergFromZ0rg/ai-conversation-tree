@@ -2,8 +2,8 @@
 
     python scripts/seed_demo.py [--server http://127.0.0.1:8000] [--token ...]
 
-It posts four chats exactly as the browser extension would (one per source),
-so running it also exercises ingestion end to end. Two pairs of chats overlap
+It posts four chats as role-tagged messages (one per source), so running it
+also exercises ingestion end to end. Two pairs of chats overlap
 on purpose (Postgres indexing, Python decorators) so the "also discussed
 elsewhere" panel and the workspace map have links to draw, and the migration
 chat contains a repeated question and an "as I said" so context-health has

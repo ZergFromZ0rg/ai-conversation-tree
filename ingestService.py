@@ -1,4 +1,4 @@
-"""Import conversations captured elsewhere (the browser extension, scripts).
+"""Import conversations captured elsewhere (exports, scripts, other apps).
 
 A captured chat arrives as a flat list of role-tagged messages. It is paired
 into turns, matched to an earlier import of the same chat by

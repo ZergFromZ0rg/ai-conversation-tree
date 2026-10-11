@@ -13,18 +13,18 @@ def test_token_gates_the_api_but_not_the_shell(client, monkeypatch):
     assert client.post("/ingest/conversations", json={}).status_code == 401
 
 
-def test_extension_origins_pass_cors_preflight(client):
+def test_dev_server_origin_passes_cors_preflight(client):
     response = client.request(
         "OPTIONS",
         "/ingest/conversations",
         headers={
-            "Origin": "chrome-extension://abcdef",
+            "Origin": "http://localhost:5173",
             "Access-Control-Request-Method": "POST",
             "Access-Control-Request-Headers": "authorization,content-type",
         },
     )
     assert response.status_code == 200
-    assert response.headers["access-control-allow-origin"] == "chrome-extension://abcdef"
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
     other = client.request(
         "OPTIONS",
         "/ingest/conversations",

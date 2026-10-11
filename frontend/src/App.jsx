@@ -74,7 +74,7 @@ function readApiKeys() {
   }
 }
 
-// The extension's "Open in the tree" link is /ui?c=<conversationId>.
+// Deep link: /ui?c=<conversationId> opens that conversation.
 function readDeepLinkConversation() {
   const raw = new URLSearchParams(window.location.search).get("c");
   const id = raw ? Number.parseInt(raw, 10) : NaN;

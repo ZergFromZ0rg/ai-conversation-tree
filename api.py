@@ -83,9 +83,7 @@ async def requireApiToken(request: Request, call_next):
 # Added after the token middleware, so it is the outermost layer: even a 401
 # carries CORS headers and the viewer can read it.
 # Extra browser origins (a hosted frontend on another domain) come from a
-# comma-separated env var. Extension pages are always allowed: they can only
-# reach the API at all when the user has configured this server's URL, and with
-# AI_CONVERSATION_TREE_API_TOKEN set they still need the token.
+# comma-separated env var; the Vite dev server origins are always allowed.
 extraOrigins = [
     origin.strip()
     for origin in os.environ.get("AI_CONVERSATION_TREE_CORS_ORIGINS", "").split(",")
@@ -94,7 +92,6 @@ extraOrigins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173", *extraOrigins],
-    allow_origin_regex=r"^(chrome|moz|safari-web)-extension://.+$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

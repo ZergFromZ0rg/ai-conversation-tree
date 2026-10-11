@@ -121,9 +121,9 @@ def initDb():
         if "model" not in conversationColumns:
             connection.execute("ALTER TABLE conversations ADD COLUMN model TEXT")
 
-        # Migrate databases created before browser-extension ingestion: a
-        # conversation imported from ChatGPT / Claude / Gemini remembers where
-        # it came from so a re-sync updates it instead of duplicating it.
+        # Migrate databases created before ingestion: a conversation imported
+        # from elsewhere remembers where it came from so a re-sync updates it
+        # instead of duplicating it.
         for column in ("source", "externalId", "sourceUrl"):
             if column not in conversationColumns:
                 connection.execute(f"ALTER TABLE conversations ADD COLUMN {column} TEXT")

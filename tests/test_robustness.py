@@ -26,9 +26,9 @@ def payload(externalId="r1", messages=CATS):
 
 def test_401_is_readable_cross_origin(client, monkeypatch):
     monkeypatch.setenv("AI_CONVERSATION_TREE_API_TOKEN", "s3cret")
-    response = client.get("/conversations", headers={"Origin": "chrome-extension://abc"})
+    response = client.get("/conversations", headers={"Origin": "http://localhost:5173"})
     assert response.status_code == 401
-    assert response.headers["access-control-allow-origin"] == "chrome-extension://abc"
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
 
 
 # --- concurrent first sync of the same chat -------------------------------
