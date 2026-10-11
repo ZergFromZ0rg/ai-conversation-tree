@@ -664,11 +664,26 @@ def applyReclassification(
         connection.close()
 
 
-def getConversationTurns(conversationId: int) -> list[dict]:
+def getConversationTurns(conversationId: int, withEmbeddings: bool = True) -> list[dict]:
+    """A conversation's turns in timeline order, with their concepts and parent edges.
+
+    Each turn's embedding (about 1.5 KB) is included unless `withEmbeddings` is
+    False; only the classifier needs it, so every caller that just reads text
+    should pass False and skip reading the vectors.
+    """
+    embeddingColumn = "turnEmbeddings.embedding" if withEmbeddings else "NULL AS embedding"
+    embeddingJoin = (
+        """
+            LEFT JOIN turnEmbeddings
+                ON turnEmbeddings.conversationId = turns.conversationId
+                AND turnEmbeddings.turnId = turns.turnId"""
+        if withEmbeddings
+        else ""
+    )
     connection = getConnection()
     try:
         rows = connection.execute(
-            """
+            f"""
             SELECT
                 turns.turnId,
                 turns.conversationId,
@@ -677,11 +692,8 @@ def getConversationTurns(conversationId: int) -> list[dict]:
                 turns.timestamp,
                 turns.root,
                 turns.timelineParent,
-                turnEmbeddings.embedding
-            FROM turns
-            LEFT JOIN turnEmbeddings
-                ON turnEmbeddings.conversationId = turns.conversationId
-                AND turnEmbeddings.turnId = turns.turnId
+                {embeddingColumn}
+            FROM turns{embeddingJoin}
             WHERE turns.conversationId = ?
             ORDER BY turns.turnId ASC
             """,
@@ -763,25 +775,27 @@ def getConversationTurnIds(conversationId: int) -> list[int]:
     return [int(row["turnId"]) for row in rows]
 
 
-def getAllConceptMembers() -> list[dict]:
+def getAllConceptMembers(withEmbeddings: bool = True) -> list[dict]:
     """Every (conversation, concept) membership with its turn text and embedding.
 
     One row per (turn, conceptId) pair, so a turn assigned to two concepts
     appears twice. Turns without a stored embedding are skipped. Feeds the
-    cross-conversation concept linker and concept labelling.
+    cross-conversation concept linker and concept labelling. Labelling and the
+    concept graph only read text, so they pass `withEmbeddings=False`: the same
+    rows come back without the vectors (an "embedding" key is then absent).
     """
+    embeddingColumn = ",\n                turnEmbeddings.embedding" if withEmbeddings else ""
     connection = getConnection()
     try:
         rows = connection.execute(
-            """
+            f"""
             SELECT
                 turnConcepts.conversationId,
                 turnConcepts.conceptId,
                 turnConcepts.conceptKey,
                 turnConcepts.turnId,
                 turns.userText,
-                turns.root,
-                turnEmbeddings.embedding
+                turns.root{embeddingColumn}
             FROM turnConcepts
             JOIN turns
                 ON turns.conversationId = turnConcepts.conversationId
@@ -803,24 +817,28 @@ def getAllConceptMembers() -> list[dict]:
             "turnId": int(row["turnId"]),
             "userText": str(row["userText"]),
             "root": bool(row["root"]),
-            "embedding": bytes(row["embedding"]),
+            **({"embedding": bytes(row["embedding"])} if withEmbeddings else {}),
         }
         for row in rows
     ]
 
 
-def getAllSearchTurns() -> list[dict]:
-    """Return lightweight turn metadata used to hydrate vector search hits."""
+def getAllSearchTurns(conversationId: int | None = None) -> list[dict]:
+    """Return lightweight turn metadata used to hydrate vector search hits,
+    for the whole workspace or, when `conversationId` is given, one conversation."""
+    scope = "WHERE turns.conversationId = ?" if conversationId is not None else ""
     connection = getConnection()
     try:
         rows = connection.execute(
-            """
+            f"""
             SELECT turns.conversationId, turns.turnId, turns.userText, turns.aiText,
                    conversations.title AS conversationTitle, conversations.source AS source
             FROM turns
             JOIN conversations ON conversations.id = turns.conversationId
+            {scope}
             ORDER BY turns.conversationId, turns.turnId
-            """
+            """,
+            (conversationId,) if conversationId is not None else (),
         ).fetchall()
     finally:
         connection.close()
@@ -837,15 +855,19 @@ def getAllSearchTurns() -> list[dict]:
     ]
 
 
-def getAllTurnEmbeddings() -> list[dict]:
+def getAllTurnEmbeddings(conversationId: int | None = None) -> list[dict]:
+    """Every stored turn embedding, or one conversation's when `conversationId` is given."""
+    scope = "WHERE conversationId = ?" if conversationId is not None else ""
     connection = getConnection()
     try:
         rows = connection.execute(
-            """
+            f"""
             SELECT conversationId, turnId, embedding
             FROM turnEmbeddings
+            {scope}
             ORDER BY conversationId, turnId
-            """
+            """,
+            (conversationId,) if conversationId is not None else (),
         ).fetchall()
     finally:
         connection.close()

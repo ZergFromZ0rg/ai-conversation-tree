@@ -226,7 +226,7 @@ def buildContextHealth(conversationId: int, windowTokens: int | None = None) -> 
 
     if getConversation(conversationId) is None:
         raise NotFoundError("Conversation not found.")
-    turns = getConversationTurns(conversationId)
+    turns = getConversationTurns(conversationId, withEmbeddings=False)
     edges = listConversationEdges(conversationId)
     if turns:
         vectors = np.stack([np.asarray(encodeText(turn["userText"]), dtype=np.float32) for turn in turns])

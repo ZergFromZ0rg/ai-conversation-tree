@@ -18,7 +18,7 @@ from .db import (
 )
 from .graphService import encodeText
 from .providers import STUB_MODEL_SPEC, ReplyRequest, getReplier, requireValidModelSpec
-from .vectorStore import searchWorkspace
+from .vectorStore import searchConversation, searchWorkspace
 
 _wordPattern = re.compile(r"[a-z0-9][a-z0-9'_-]{1,}", re.IGNORECASE)
 _stopwords = frozenset(
@@ -45,12 +45,19 @@ def _topicTerms(turns: list[dict], limit: int = 8) -> list[str]:
     return [term for term, _ in counts.most_common(limit)]
 
 
-def buildConversationSummary(conversationId: int) -> dict:
+def _loadConversation(conversationId: int) -> tuple[dict, list[dict], list[dict]]:
+    """A conversation, its turns (text only), and its edges, each read once."""
     conversation = getConversation(conversationId)
     if conversation is None:
         raise NotFoundError("Conversation not found.")
-    turns = getConversationTurns(conversationId)
-    edges = listConversationEdges(conversationId)
+    return (
+        conversation,
+        getConversationTurns(conversationId, withEmbeddings=False),
+        listConversationEdges(conversationId),
+    )
+
+
+def _summaryFrom(conversation: dict, turns: list[dict], edges: list[dict]) -> dict:
     roots = [turn for turn in turns if turn["root"]]
     topics = _topicTerms(turns)
     topicText = ", ".join(topics) if topics else "general discussion"
@@ -65,7 +72,7 @@ def buildConversationSummary(conversationId: int) -> dict:
             f"{'s' if len(edges) != 1 else ''}."
         )
     return {
-        "conversationId": conversationId,
+        "conversationId": conversation["id"],
         "title": conversation["title"],
         "summary": summary,
         "turnCount": len(turns),
@@ -75,6 +82,10 @@ def buildConversationSummary(conversationId: int) -> dict:
         "generatedAt": datetime.now().isoformat(timespec="seconds"),
         "mode": "structured-local",
     }
+
+
+def buildConversationSummary(conversationId: int) -> dict:
+    return _summaryFrom(*_loadConversation(conversationId))
 
 
 def _matchedTerms(queryTerms: list[str], text: str) -> list[str]:
@@ -116,24 +127,30 @@ def searchConversations(query: str, limit: int = 20, conversationId: int | None 
         raise InvalidInputError(f"limit must be between 1 and {MAX_SEARCH_LIMIT}.")
     queryTerms = list(dict.fromkeys(_terms(query)))
     embedding = encodeText(query)
-    vectorRows = searchWorkspace(embedding, limit * 4 if conversationId is None else 100000)
+    if conversationId is None:
+        vectorRows = searchWorkspace(embedding, limit * 4)
+    else:
+        inConversation = searchConversation(conversationId, embedding, None, 100000)
+        vectorRows = (
+            None
+            if inConversation is None
+            else [(conversationId, turnId, score) for turnId, score in inConversation]
+        )
     if vectorRows is None:
         queryVector = np.asarray(embedding, dtype=np.float32)
         queryNorm = max(float(np.linalg.norm(queryVector)), 1e-8)
         scored = []
-        for row in getAllTurnEmbeddings():
+        for row in getAllTurnEmbeddings(conversationId):
             candidate = np.frombuffer(row["embedding"], dtype=np.float32)
             score = float(candidate @ queryVector) / max(float(np.linalg.norm(candidate)) * queryNorm, 1e-8)
             scored.append((row["conversationId"], row["turnId"], score))
         vectorRows = scored
     semanticByKey = {(cid, tid): score for cid, tid, score in vectorRows}
 
-    allTurns = getAllSearchTurns()
+    allTurns = getAllSearchTurns(conversationId)
     turnCounts = Counter(row["conversationId"] for row in allTurns)
     candidates = []
     for row in allTurns:
-        if conversationId is not None and row["conversationId"] != conversationId:
-            continue
         key = (row["conversationId"], row["turnId"])
         semantic = semanticByKey.get(key, 0.0)
         questionTerms = _matchedTerms(queryTerms, row["userText"])
@@ -227,15 +244,14 @@ def buildLlmSummary(conversationId: int, model: str | None = None, apiKey: str |
     """
     requireValidModelSpec(model)
     replier = getReplier()
-    base = buildConversationSummary(conversationId)
-    if base["turnCount"] == 0:
+    conversation, turns, edges = _loadConversation(conversationId)
+    base = _summaryFrom(conversation, turns, edges)
+    if not turns:
         return base
-    conversation = getConversation(conversationId)
-    modelSpec = model or (conversation or {}).get("model") or replier.defaultModelSpec()
+    modelSpec = model or conversation.get("model") or replier.defaultModelSpec()
     if modelSpec == STUB_MODEL_SPEC:
         return {**base, "fallbackReason": "The stub model can't write summaries; pick a real model."}
 
-    turns = getConversationTurns(conversationId)
     cacheKey = _summaryCacheKey(conversationId, turns, modelSpec, replier)
     cached = _cachedSummary(cacheKey)
     if cached is not None:
@@ -263,15 +279,10 @@ def reset() -> None:
 
 
 def buildConversationReport(conversationId: int) -> dict:
-    conversation = getConversation(conversationId)
-    if conversation is None:
-        raise NotFoundError("Conversation not found.")
-    turns = getConversationTurns(conversationId)
-    edges = listConversationEdges(conversationId)
-    summary = buildConversationSummary(conversationId)
+    conversation, turns, edges = _loadConversation(conversationId)
     return {
         "conversation": conversation,
-        "summary": summary,
+        "summary": _summaryFrom(conversation, turns, edges),
         "turns": [
             {
                 "turnId": turn["id"],

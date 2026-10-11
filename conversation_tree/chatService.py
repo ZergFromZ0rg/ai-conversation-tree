@@ -119,7 +119,7 @@ def serializeStoredTurns(storedTurns: list[dict]) -> list[dict]:
 
 
 def buildConversationPayload(conversationId: int) -> dict:
-    storedTurns = getConversationTurns(conversationId)
+    storedTurns = getConversationTurns(conversationId, withEmbeddings=False)
     graph = buildGraphPayloadFromStoredTurns(conversationId, storedTurns)
     return {
         "conversationId": conversationId,
@@ -199,13 +199,13 @@ def listConversationTurns(conversationId: int) -> dict:
     _requireConversation(conversationId)
     return {
         "conversationId": conversationId,
-        "turns": serializeStoredTurns(getConversationTurns(conversationId)),
+        "turns": serializeStoredTurns(getConversationTurns(conversationId, withEmbeddings=False)),
     }
 
 
 def listConversationGraph(conversationId: int) -> dict:
     _requireConversation(conversationId)
-    storedTurns = getConversationTurns(conversationId)
+    storedTurns = getConversationTurns(conversationId, withEmbeddings=False)
     graph = buildGraphPayloadFromStoredTurns(conversationId, storedTurns)
     return {"conversationId": conversationId, "nodes": graph["nodes"], "edges": graph["edges"]}
 
@@ -238,7 +238,7 @@ def _serializeConceptEdge(link: dict) -> dict:
 
 def listConceptGraph() -> dict:
     """Workspace-wide concept graph: every concept as a node, links as edges."""
-    members = getAllConceptMembers()
+    members = getAllConceptMembers(withEmbeddings=False)  # labels and counts only read text
     labels = conceptLabelsFromMembers(members)
     turnCounts = _conceptTurnCounts(members)
     conceptKeys = {
@@ -268,7 +268,7 @@ def listConversationConceptLinks(conversationId: int) -> dict:
     by the local conceptId, each entry naming the far conversation and concept.
     """
     _requireConversation(conversationId)
-    members = getAllConceptMembers()
+    members = getAllConceptMembers(withEmbeddings=False)  # labels and counts only read text
     labels = conceptLabelsFromMembers(members)
     titles = {conversation["id"]: conversation["title"] for conversation in listConversations()}
 
@@ -430,7 +430,7 @@ def _replyRequest(conversationId: int, userText: str, modelSpec: str | None, api
     """The request for a reply to `userText`: the model, plus as much of the
     conversation so far as fits the context window."""
     history = recentHistory(
-        getConversationTurns(conversationId), userText, getSettings().contextWindowTokens
+        getConversationTurns(conversationId, withEmbeddings=False), userText, getSettings().contextWindowTokens
     )
     return ReplyRequest(userText, modelSpec, apiKey, conversationId, history)
 

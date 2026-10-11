@@ -136,7 +136,7 @@ def ingestConversation(
 
     rebuilt = False
     with lockedGraph(conversationId) as graph:
-        stored = [(turn["userText"], turn["aiText"]) for turn in getConversationTurns(conversationId)]
+        stored = [(turn["userText"], turn["aiText"]) for turn in getConversationTurns(conversationId, withEmbeddings=False)]
         shared = _sharedPrefixLength(stored, incoming)
         if shared < len(stored):
             # Diverged (an edited prompt or regenerated answer): rebuild from
