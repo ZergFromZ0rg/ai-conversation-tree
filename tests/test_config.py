@@ -10,7 +10,9 @@ from pathlib import Path
 import pytest
 
 import conversation_tree
-from conversation_tree import Settings, analysisService, api, conceptIndex, config, db, graphService, graphStore, vectorStore
+from conversation_tree import (
+    Settings, analysisService, api, conceptIndex, config, db, graphService, graphStore, providers, vectorStore,
+)
 from conversation_tree.conversationErrors import ConversationTreeError, NotConfiguredError
 from conversation_tree.chatService import appendTurn, createConversationSession
 from conversation_tree.contextService import buildContextHealth
@@ -172,3 +174,88 @@ def test_a_new_database_is_not_debounced_by_the_old_ones_relink_times(reconfigur
     assert sameId == conversationId, "a fresh database hands out the same ids again"
     appendTurn(sameId, "What do cats eat?", "Meat.")
     assert relinked == [sameId], "the relink must not be skipped as 'just done' by the other database's timestamp"
+
+
+# --- settings are validated and made absolute when created ----------------------
+
+def test_a_relative_database_path_is_made_absolute_when_the_settings_are_created(monkeypatch, tmp_path):
+    here, there = tmp_path / "here", tmp_path / "there"
+    here.mkdir(); there.mkdir()
+    monkeypatch.chdir(here)
+    settings = Settings(dbPath="data/../rel/c.db")
+    assert settings.dbPath == here / "rel" / "c.db"
+    monkeypatch.chdir(there)
+    assert settings.dbPath == here / "rel" / "c.db", "it must not follow the working directory afterwards"
+    assert Settings(dbPath="~/c.db").dbPath == Path.home() / "c.db"
+
+
+def test_a_host_that_changes_directory_after_init_keeps_its_database(reconfigurable, monkeypatch, tmp_path):
+    here, there = tmp_path / "here", tmp_path / "there"
+    here.mkdir(); there.mkdir()
+    monkeypatch.chdir(here)
+    conversation_tree.init(Settings(dbPath="rel/c.db"))
+    createConversationSession("made before the chdir")
+    monkeypatch.chdir(there)
+    assert [c["title"] for c in db.listConversations()] == ["made before the chdir"]
+    assert not (there / "rel").exists()
+
+
+@pytest.mark.parametrize("window", [0, -5, 1.5, "8000", True, None])
+def test_the_context_window_must_be_a_positive_integer(tmp_path, window):
+    with pytest.raises(ValueError, match="contextWindowTokens"):
+        Settings(dbPath=tmp_path / "x.db", contextWindowTokens=window)
+
+
+@pytest.mark.parametrize("value", ["lots", "0", "-3", "1.5"])
+def test_a_bad_window_in_the_environment_names_the_variable(value):
+    with pytest.raises(ValueError, match="AI_CONVERSATION_TREE_CONTEXT_TOKENS"):
+        Settings.fromEnv({"AI_CONVERSATION_TREE_CONTEXT_TOKENS": value})
+
+
+# --- init is all-or-nothing ---------------------------------------------------
+
+def populate_running_state(conversation_id_source):
+    """Put something in every cache init() would otherwise drop."""
+    conversationId = conversation_id_source()
+    with graphStore.lockedGraph(conversationId):
+        pass
+    vectorStore._schemaReady = True
+    conceptIndex._lastRelink[conversationId] = time.monotonic()
+    return conversationId
+
+
+def test_init_keeps_the_running_configuration_when_the_database_cannot_open(reconfigurable, configured, tmp_path):
+    marker = lambda request: "still the old replier"
+    providers.setReplier(marker)
+    populate_running_state(lambda: ingestConversation("other", "keep", chat(("What are cats?", "Mammals.")))["conversationId"])
+    cacheBefore = dict(graphStore._cache)
+
+    blocker = tmp_path / "a-file"
+    blocker.write_text("not a directory")
+    with pytest.raises(OSError):
+        conversation_tree.init(Settings(dbPath=blocker / "inside" / "c.db"), replier=lambda request: "new")
+
+    assert config.getSettings() == configured, "the previous settings are restored"
+    assert providers.getReplier()._function is marker, "the previous replier is kept"
+    assert dict(graphStore._cache) == cacheBefore and vectorStore._schemaReady is True
+    assert conceptIndex._lastRelink, "no cache was dropped for a configuration that never took effect"
+    assert db.listConversations(), "and the previous database still answers"
+
+
+def test_init_with_an_unusable_replier_changes_nothing(reconfigurable, configured, tmp_path):
+    target = tmp_path / "never-created.db"
+    with pytest.raises(TypeError):
+        conversation_tree.init(Settings(dbPath=target), replier=42)
+    assert config.getSettings() == configured
+    assert not target.exists()
+
+
+def test_a_failed_first_init_leaves_the_package_unconfigured(reconfigurable, monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "_settings", None)
+    blocker = tmp_path / "a-file"
+    blocker.write_text("x")
+    with pytest.raises(OSError):
+        conversation_tree.init(Settings(dbPath=blocker / "inside" / "c.db"))
+    assert config.currentSettings() is None
+    with pytest.raises(NotConfiguredError):
+        db.getConnection()

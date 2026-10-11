@@ -33,7 +33,13 @@ class Settings:
     """PostgreSQL URL for pgvector retrieval. ``None`` keeps retrieval local (NumPy)."""
 
     def __post_init__(self):
-        object.__setattr__(self, "dbPath", Path(self.dbPath))
+        # Absolute from the start: a relative path would otherwise be resolved
+        # against whatever the working directory is at each later connection,
+        # and silently follow a host that changes directory.
+        object.__setattr__(self, "dbPath", Path(os.path.abspath(Path(self.dbPath).expanduser())))
+        window = self.contextWindowTokens
+        if isinstance(window, bool) or not isinstance(window, int) or window <= 0:
+            raise ValueError(f"contextWindowTokens must be a positive integer, got {window!r}.")
 
     @classmethod
     def fromEnv(cls, environ=None) -> "Settings":
@@ -46,11 +52,16 @@ class Settings:
           local Compose database; retrieval falls back to NumPy if it is unreachable)
         """
         environ = os.environ if environ is None else environ
+        rawWindow = environ.get("AI_CONVERSATION_TREE_CONTEXT_TOKENS") or DEFAULT_CONTEXT_WINDOW_TOKENS
+        try:
+            window = int(rawWindow)
+        except ValueError:
+            window = 0
+        if window <= 0:
+            raise ValueError(f"AI_CONVERSATION_TREE_CONTEXT_TOKENS must be a positive integer, got {rawWindow!r}.")
         return cls(
             dbPath=environ.get("AI_CONVERSATION_TREE_DB") or Path.cwd() / ".data" / "conversationTree.db",
-            contextWindowTokens=int(
-                environ.get("AI_CONVERSATION_TREE_CONTEXT_TOKENS") or DEFAULT_CONTEXT_WINDOW_TOKENS
-            ),
+            contextWindowTokens=window,
             pgvectorUrl=environ.get("PGVECTOR_DATABASE_URL")
             or environ.get("DATABASE_URL")
             or LOCAL_PGVECTOR_URL,
@@ -60,7 +71,7 @@ class Settings:
 _settings: Settings | None = None
 
 
-def configure(settings: Settings) -> None:
+def configure(settings: Settings | None) -> None:
     global _settings
     _settings = settings
 

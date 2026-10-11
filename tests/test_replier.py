@@ -187,6 +187,20 @@ def test_something_that_is_not_a_replier_is_rejected():
         providers.setReplier(42)
 
 
+class Plain(providers.Replier):
+    def generate(self, request):
+        return "plain"
+
+
+def test_a_replier_class_that_was_never_instantiated_is_rejected_up_front():
+    with pytest.raises(TypeError, match=r"pass Plain\(\)"):
+        providers.setReplier(Plain)
+    with pytest.raises(TypeError, match="instance"):
+        providers.setReplier(dict)  # a class is callable, but never a usable reply function
+    assert isinstance(providers.getReplier(), providers.BuiltinReplier), "a rejected replier is not installed"
+    assert providers.setReplier(Plain()).generate(providers.ReplyRequest("q")) == "plain"
+
+
 def test_init_installs_the_replier_and_resets_it_when_omitted(reconfigurable, configured, tmp_path):
     function = lambda *_args: "x"
     conversation_tree.init(Settings(dbPath=tmp_path / "r.db"), replier=function)

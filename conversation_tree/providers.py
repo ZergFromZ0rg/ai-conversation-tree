@@ -597,18 +597,34 @@ class CallableReplier(Replier):
 _replier: Replier = BuiltinReplier()
 
 
+def makeReplier(replier: "Replier | Callable | None") -> Replier:
+    """Turn what a host passed into a Replier, or raise TypeError.
+
+    ``None`` is the built-in providers, a ``Replier`` instance is itself, and a
+    plain function is wrapped. A class is refused even though it is callable:
+    passing ``MyReplier`` instead of ``MyReplier()`` is a mistake that would
+    otherwise surface as a baffling provider error on the first request.
+    """
+    if replier is None:
+        return BuiltinReplier()
+    if isinstance(replier, Replier):
+        return replier
+    if isinstance(replier, type):
+        raise TypeError(
+            f"replier must be an instance, not the class {replier.__name__}: pass {replier.__name__}() "
+            "(or a function of a ReplyRequest)"
+        )
+    if not callable(replier):
+        raise TypeError("replier must be a Replier, a callable(ReplyRequest) -> str, or None")
+    return CallableReplier(replier)
+
+
 def setReplier(replier: "Replier | Callable | None") -> Replier:
     """Install the replier the package uses. ``None`` restores the built-in one;
-    a plain function is wrapped in a CallableReplier."""
+    a plain function is wrapped in a CallableReplier (see ``makeReplier``)."""
     global _replier
-    if replier is None:
-        replier = BuiltinReplier()
-    elif not isinstance(replier, Replier):
-        if not callable(replier):
-            raise TypeError("replier must be a Replier, a callable(ReplyRequest) -> str, or None")
-        replier = CallableReplier(replier)
-    _replier = replier
-    return replier
+    _replier = makeReplier(replier)
+    return _replier
 
 
 def getReplier() -> Replier:
