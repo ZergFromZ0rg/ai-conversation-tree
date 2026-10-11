@@ -27,7 +27,8 @@ class Settings:
     contextWindowTokens: int = DEFAULT_CONTEXT_WINDOW_TOKENS
     """Assumed size of the span a model attends to well. Context-loss detection
     measures against it, and it caps how much earlier conversation is sent with
-    each new message."""
+    each new message. This is the default: a replier that knows each of its
+    models' windows overrides it per model (``Replier.contextWindowTokens``)."""
 
     pgvectorUrl: str | None = None
     """PostgreSQL URL for pgvector retrieval. ``None`` keeps retrieval local (NumPy)."""

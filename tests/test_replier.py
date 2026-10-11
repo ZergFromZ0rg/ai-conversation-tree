@@ -8,6 +8,7 @@ import pytest
 import conversation_tree
 from conversation_tree import Settings, api, db, providers
 from conversation_tree.analysisService import buildLlmSummary
+from conversation_tree.contextService import buildContextHealth
 from conversation_tree.chatService import (
     appendTurn,
     createConversationSession,
@@ -386,3 +387,90 @@ def test_the_summary_cache_is_bounded_and_survives_concurrent_use():
     assert errors == []
     assert len(analysisService._summaryCache) <= analysisService._SUMMARY_CACHE_MAX
     analysisService.reset()
+
+
+# --- a replier can report each model's context window ----------------------------
+
+class Windows(providers.Replier):
+    """Two models with very different windows, and a default."""
+
+    windows = {"small": 100, "big": 100_000}
+
+    def generate(self, request):
+        return "ok"
+
+    def defaultModelSpec(self):
+        return "small"
+
+    def contextWindowTokens(self, modelSpec):
+        return self.windows.get(modelSpec)
+
+
+def long_conversation(count=4):
+    """Turns costing 200 tokens each (400 characters each way), recorded without a model."""
+    cid = createConversationSession()["conversationId"]
+    for number in range(count):
+        appendTurn(cid, f"{number}" * 400, f"{number}" * 400)
+    return cid
+
+
+def history_length_for(model):
+    """How many history messages a fresh 4-turn (800-token) conversation sends to `model`."""
+    requests = []
+
+    class Capturing(Windows):
+        def generate(self, request):
+            requests.append(request)
+            return "ok"
+
+    providers.setReplier(Capturing())
+    processChatMessage(long_conversation(), "hi", model)
+    return len(requests[0].history)
+
+
+def test_the_history_is_sized_by_the_window_of_the_model_being_asked(client):
+    assert history_length_for("big") == 8, "a 100,000-token window takes all four turns (8 messages)"
+    assert history_length_for("small") == 0, "a 100-token window cannot fit even one 200-token turn"
+    assert history_length_for("unlisted") == 8, "a model the replier does not list uses the 8,000-token setting"
+
+
+def test_a_model_with_no_stored_choice_uses_the_repliers_default_models_window(client):
+    conversationId = long_conversation(2)
+    requests = []
+
+    class Capturing(Windows):
+        def generate(self, request):
+            requests.append(request)
+            return "ok"
+
+    providers.setReplier(Capturing())
+    processChatMessage(conversationId, "hi")  # no model anywhere: the default, "small", has a 100-token window
+    assert requests[0].modelSpec is None and requests[0].history == []
+
+
+def test_the_context_health_window_follows_the_conversations_model(client):
+    providers.setReplier(Windows())
+    conversationId = long_conversation(2)
+    assert buildContextHealth(conversationId)["windowTokens"] == 100, "the replier's default model, 'small'"
+    providers.setReplier(lambda request: "ok")  # a plain function reports no windows: the setting applies
+    assert buildContextHealth(conversationId)["windowTokens"] == 8000
+    providers.setReplier(Windows())
+    createConversationSession(model="big")
+    bigId = [c for c in db.listConversations() if c["model"] == "big"][0]["id"]
+    appendTurn(bigId, "q" * 40, "a" * 40)
+    assert buildContextHealth(bigId)["windowTokens"] == 100_000
+    assert buildContextHealth(bigId, windowTokens=64)["windowTokens"] == 64, "an explicit window still wins"
+
+
+@pytest.mark.parametrize("bad", [0, -1, 2.5, "8000", True])
+def test_a_replier_reporting_a_nonsense_window_is_a_loud_error_not_a_silent_fallback(client, bad):
+    class Broken(providers.Replier):
+        def generate(self, request):
+            return "ok"
+
+        def contextWindowTokens(self, modelSpec):
+            return bad
+
+    providers.setReplier(Broken())
+    with pytest.raises(ValueError, match="positive integer or None"):
+        providers.contextWindowFor("anything")

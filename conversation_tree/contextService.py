@@ -20,8 +20,9 @@ import re
 
 import numpy as np
 
-from .config import DEFAULT_CONTEXT_WINDOW_TOKENS, getSettings
+from .config import DEFAULT_CONTEXT_WINDOW_TOKENS
 from .conversationErrors import NotFoundError
+from .providers import contextWindowFor
 
 # Tokens are estimated as chars / 4. How large a window to assume comes from
 # Settings.contextWindowTokens (a larger or smaller model needs a different one).
@@ -224,7 +225,8 @@ def buildContextHealth(conversationId: int, windowTokens: int | None = None) -> 
     from .db import getConversation, getConversationTurns, listConversationEdges
     from .graphService import encodeText
 
-    if getConversation(conversationId) is None:
+    conversation = getConversation(conversationId)
+    if conversation is None:
         raise NotFoundError("Conversation not found.")
     turns = getConversationTurns(conversationId, withEmbeddings=False)
     edges = listConversationEdges(conversationId)
@@ -233,6 +235,6 @@ def buildContextHealth(conversationId: int, windowTokens: int | None = None) -> 
         vectors = vectors / np.maximum(np.linalg.norm(vectors, axis=1, keepdims=True), 1e-8)
     else:
         vectors = np.zeros((0, 1), dtype=np.float32)
-    report = analyzeContextHealth(turns, vectors, edges, windowTokens or getSettings().contextWindowTokens)
+    report = analyzeContextHealth(turns, vectors, edges, windowTokens or contextWindowFor(conversation.get("model")))
     report["conversationId"] = conversationId
     return report

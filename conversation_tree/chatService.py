@@ -34,8 +34,7 @@ from .conceptIndex import (
 from .graphService import addTurn, reclassifyTurns
 from .graphStore import invalidate, lockedGraph
 from .contextService import recentHistory
-from .config import getSettings
-from .providers import ReplyRequest, getReplier, requireValidModelSpec
+from .providers import ReplyRequest, contextWindowFor, getReplier, requireValidModelSpec
 
 EDGE_LABELS = ("continuation", "branch", "related")
 CONCEPT_LINK_KINDS = ("same", "related")
@@ -428,9 +427,9 @@ def _requireReplyText(aiText) -> str:
 
 def _replyRequest(conversationId: int, userText: str, modelSpec: str | None, apiKey: str | None) -> ReplyRequest:
     """The request for a reply to `userText`: the model, plus as much of the
-    conversation so far as fits the context window."""
+    conversation so far as fits that model's context window."""
     history = recentHistory(
-        getConversationTurns(conversationId, withEmbeddings=False), userText, getSettings().contextWindowTokens
+        getConversationTurns(conversationId, withEmbeddings=False), userText, contextWindowFor(modelSpec)
     )
     return ReplyRequest(userText, modelSpec, apiKey, conversationId, history)
 

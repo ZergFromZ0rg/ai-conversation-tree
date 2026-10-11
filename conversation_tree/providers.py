@@ -17,6 +17,7 @@ from typing import Callable, Iterator
 
 import httpx
 
+from .config import getSettings
 from .conversationErrors import InvalidInputError, ProviderError
 
 STUB_MODEL_SPEC = "stub"
@@ -556,6 +557,15 @@ class Replier:
         """The model used when neither the request nor the conversation names one."""
         return None
 
+    def contextWindowTokens(self, modelSpec: str | None) -> int | None:
+        """How many tokens of conversation `modelSpec` can take, if this replier
+        knows. None (the default) means "use ``Settings.contextWindowTokens``".
+
+        The same number sizes the history sent with each message and the
+        window the context-health panel measures against, so a replier serving
+        models with different windows should report each one."""
+        return None
+
 
 class BuiltinReplier(Replier):
     """The environment-driven providers: Ollama, OpenAI, Anthropic, Gemini, or a stub."""
@@ -629,6 +639,20 @@ def setReplier(replier: "Replier | Callable | None") -> Replier:
 
 def getReplier() -> Replier:
     return _replier
+
+
+def contextWindowFor(modelSpec: str | None) -> int:
+    """The context window, in tokens, to assume for `modelSpec` (None meaning the
+    replier's default model): what the replier reports, else the setting."""
+    replier = getReplier()
+    window = replier.contextWindowTokens(modelSpec or replier.defaultModelSpec())
+    if window is None:
+        return getSettings().contextWindowTokens
+    if isinstance(window, bool) or not isinstance(window, int) or window <= 0:
+        raise ValueError(
+            f"{type(replier).__name__}.contextWindowTokens must return a positive integer or None, got {window!r}."
+        )
+    return window
 
 
 def requireValidModelSpec(model: str | None) -> None:
