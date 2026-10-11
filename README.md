@@ -465,7 +465,7 @@ with `None` / `False` returns or transport errors:
 | `NotFoundError` | the conversation, edge, concept, or link doesn't exist | 404 | `LookupError` |
 | `InvalidInputError` | the request breaks a domain rule | 422 | `ValueError` |
 | `ProviderError` | the model provider failed, is unreachable, or isn't configured | 502 | `RuntimeError` |
-| `ConflictError` | a write collides with an existing record (a duplicate import) | 409 | |
+| `ConflictError` | a write collides with an existing record (a duplicate import); `ingestConversation` handles it itself, so no endpoint returns it | | |
 | `NotConfiguredError` | a service ran before `init()` | | `RuntimeError` |
 
 All derive from `ConversationTreeError`. Provider calls translate `httpx`

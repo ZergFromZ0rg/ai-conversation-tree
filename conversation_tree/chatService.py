@@ -1,6 +1,13 @@
 from datetime import datetime
 from typing import NamedTuple
 
+from .conceptIndex import (
+    conceptLabelsFromMembers,
+    forgetConversation,
+    matchConceptKeys,
+    maybeRelinkConcepts,
+)
+from .contextService import recentHistory
 from .conversationErrors import InvalidInputError, NotFoundError, ProviderError
 from .db import (
     applyReclassification,
@@ -25,21 +32,12 @@ from .db import (
     setConversationTitle,
     updateEdge,
 )
-from .conceptIndex import (
-    conceptLabelsFromMembers,
-    forgetConversation,
-    matchConceptKeys,
-    maybeRelinkConcepts,
-)
 from .graphService import addTurn, reclassifyTurns
 from .graphStore import invalidate, lockedGraph
-from .contextService import recentHistory
 from .providers import ReplyRequest, contextWindowFor, getReplier, requireValidModelSpec
 
 EDGE_LABELS = ("continuation", "branch", "related")
 CONCEPT_LINK_KINDS = ("same", "related")
-
-
 
 
 def serializeGraphNode(nodeId: int, userText: str, aiText: str, conceptIds: list[int], root: bool, timelineParent: int | None) -> dict:
@@ -98,8 +96,6 @@ def buildGraphPayloadFromStoredTurns(conversationId: int, storedTurns: list[dict
     }
 
 
-
-
 def serializeStoredTurns(storedTurns: list[dict]) -> list[dict]:
     return [
         {
@@ -147,8 +143,6 @@ def persistGraphTurn(conversationId: int, turn) -> None:
     saveTurnBundle(conversationId=conversationId, **turnBundle(turn))
 
 
-
-
 def _requireConversation(conversationId: int) -> dict:
     conversation = getConversation(conversationId)
     if conversation is None:
@@ -178,12 +172,6 @@ def setConversationSessionModel(conversationId: int, model: str | None) -> dict:
     if conversation is None:
         raise NotFoundError("Conversation not found.")
     return conversation
-
-
-def loadConversationSession(conversationId: int) -> dict:
-    # Touch the cache so the graph is warm for the next turn.
-    with lockedGraph(conversationId):
-        return buildConversationPayload(conversationId)
 
 
 def deleteConversationSession(conversationId: int) -> None:

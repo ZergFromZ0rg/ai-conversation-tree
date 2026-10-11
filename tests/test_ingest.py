@@ -4,6 +4,7 @@ import pytest
 
 from conftest import chat
 from conversation_tree import db, ingestService, vectorStore
+from conversation_tree.conversationErrors import ConflictError
 from conversation_tree.ingestService import ingestConversation, pairMessagesIntoTurns
 
 CATS = chat(
@@ -207,3 +208,10 @@ def test_validation(client):
     unanswered = [{"role": "user", "text": "hello?"}]
     assert client.post("/ingest/conversations", json=payload(unanswered)).status_code == 422
     assert client.post("/ingest/conversations", json=payload(CATS, externalId="")).status_code == 422
+
+
+def test_a_conflict_whose_conversation_has_vanished_is_reported_not_a_type_error(client, monkeypatch):
+    ingestConversation("chatgpt", "abc", CATS)
+    monkeypatch.setattr(ingestService, "findConversationBySource", lambda source, externalId: None)
+    with pytest.raises(ConflictError):  # create collides, and the re-read finds nothing
+        ingestConversation("chatgpt", "abc", CATS)

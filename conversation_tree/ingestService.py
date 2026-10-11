@@ -127,6 +127,8 @@ def ingestConversation(
             # A concurrent sync of the same new chat (auto-sync racing the
             # popup button) created it first; join that conversation.
             existing = findConversationBySource(source, externalId)
+            if existing is None:
+                raise  # it vanished again (deleted meanwhile): let the caller retry
             created = False
             conversationId = existing["id"]
     else:

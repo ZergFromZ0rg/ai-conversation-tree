@@ -34,7 +34,7 @@ from .chatService import (
 )
 from .conceptIndex import relinkAllConceptLinks
 from .config import Settings
-from .conversationErrors import ConflictError, InvalidInputError, NotFoundError, ProviderError
+from .conversationErrors import InvalidInputError, NotFoundError, ProviderError
 from .graphService import analyzeImmediateRelationship
 from .analysisService import (
     buildConversationReport,
@@ -91,10 +91,6 @@ async def handleNotFound(request: Request, error: NotFoundError):
 
 async def handleInvalidInput(request: Request, error: InvalidInputError):
     return JSONResponse({"detail": str(error)}, status_code=status.HTTP_422_UNPROCESSABLE_ENTITY)
-
-
-async def handleConflict(request: Request, error: ConflictError):
-    return JSONResponse({"detail": str(error)}, status_code=status.HTTP_409_CONFLICT)
 
 
 async def handleProviderError(request: Request, error: ProviderError):
@@ -478,7 +474,6 @@ def createApp(
 
     app.add_exception_handler(NotFoundError, handleNotFound)
     app.add_exception_handler(InvalidInputError, handleInvalidInput)
-    app.add_exception_handler(ConflictError, handleConflict)
     app.add_exception_handler(ProviderError, handleProviderError)
     app.include_router(router)
     return app
