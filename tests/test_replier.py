@@ -1,6 +1,7 @@
 """Plugging in a host's own model layer."""
 
 import asyncio
+import threading
 
 import pytest
 
@@ -342,3 +343,46 @@ def test_a_successful_turn_saves_the_explicit_model_blocking_and_streaming(conve
     assert getConversationSession(conversationId)["model"] == "model-a"
     list(streamChatMessage(conversationId, "second", "model-b"))
     assert getConversationSession(conversationId)["model"] == "model-b"
+
+
+# --- the summary cache ----------------------------------------------------------
+
+def three_chat_messages(middle):
+    return chat(("What are cats?", "Small mammals."), (middle, "Meat."), ("Thanks", "You're welcome."))
+
+
+def test_an_edited_earlier_turn_is_a_new_summary_even_when_the_count_and_last_turn_match(client):
+    calls = []
+    providers.setReplier(lambda request: calls.append(request.userText) or f"summary {len(calls)}")
+    conversationId = ingestConversation("other", "edit", three_chat_messages("What do cats eat?"))["conversationId"]
+
+    assert buildLlmSummary(conversationId)["summary"] == "summary 1"
+    assert buildLlmSummary(conversationId)["summary"] == "summary 1", "an unchanged chat is served from the cache"
+
+    ingestConversation("other", "edit", three_chat_messages("Do cats sleep a lot?"))  # same length, same last turn
+    assert buildLlmSummary(conversationId)["summary"] == "summary 2", "the edit must not be answered from the old cache"
+    assert len(calls) == 2
+
+
+def test_the_summary_cache_is_bounded_and_survives_concurrent_use():
+    from conversation_tree import analysisService
+
+    analysisService.reset()
+    errors = []
+
+    def hammer(worker):
+        try:
+            for number in range(300):
+                analysisService._cacheSummary((worker, number), {"summary": str(number)})
+                analysisService._cachedSummary((worker, number - 1))
+        except Exception as error:  # a race on the shared dict would show up here
+            errors.append(error)
+
+    threads = [threading.Thread(target=hammer, args=(worker,)) for worker in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert len(analysisService._summaryCache) <= analysisService._SUMMARY_CACHE_MAX
+    analysisService.reset()

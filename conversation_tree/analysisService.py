@@ -2,7 +2,9 @@
 
 from collections import Counter
 from datetime import datetime
+import hashlib
 import re
+import threading
 
 import numpy as np
 
@@ -167,12 +169,39 @@ def searchConversations(query: str, limit: int = 20, conversationId: int | None 
 
 
 _summaryCache: dict[tuple, dict] = {}
+_summaryCacheLock = threading.Lock()
+_SUMMARY_CACHE_MAX = 64
 _summaryPrompt = (
     "Summarize the conversation below in 3-5 sentences of plain prose. Say what the user was "
     "trying to do, the main conclusions or answers reached, and any threads left open. "
     "No preamble, no bullet points, no markdown headings.\n\n"
 )
 _summaryTranscriptChars = 12000
+
+
+def _summaryCacheKey(conversationId: int, turns: list[dict], modelSpec: str | None, replier) -> tuple:
+    """Identifies a summary by everything it was written from: the whole
+    transcript (not just its length and last turn, so an edited earlier turn is
+    a different summary), the model, and the replier that wrote it."""
+    digest = hashlib.blake2b(digest_size=16)
+    for turn in turns:
+        digest.update(turn["userText"].encode())
+        digest.update(b"\x00")
+        digest.update(turn["aiText"].encode())
+        digest.update(b"\x01")
+    return (conversationId, digest.hexdigest(), modelSpec, id(replier))
+
+
+def _cachedSummary(key: tuple) -> dict | None:
+    with _summaryCacheLock:
+        return _summaryCache.get(key)
+
+
+def _cacheSummary(key: tuple, summary: dict) -> None:
+    with _summaryCacheLock:
+        _summaryCache[key] = summary
+        while len(_summaryCache) > _SUMMARY_CACHE_MAX:
+            _summaryCache.pop(next(iter(_summaryCache)))
 
 
 def _transcriptForSummary(turns: list[dict]) -> str:
@@ -207,9 +236,8 @@ def buildLlmSummary(conversationId: int, model: str | None = None, apiKey: str |
         return {**base, "fallbackReason": "The stub model can't write summaries; pick a real model."}
 
     turns = getConversationTurns(conversationId)
-    lastTurn = turns[-1]
-    cacheKey = (conversationId, len(turns), hash(lastTurn["userText"] + lastTurn["aiText"]), modelSpec, id(replier))
-    cached = _summaryCache.get(cacheKey)
+    cacheKey = _summaryCacheKey(conversationId, turns, modelSpec, replier)
+    cached = _cachedSummary(cacheKey)
     if cached is not None:
         return cached
 
@@ -223,16 +251,15 @@ def buildLlmSummary(conversationId: int, model: str | None = None, apiKey: str |
     if not text:
         return {**base, "fallbackReason": "The model returned no text."}
     result = {**base, "summary": text, "mode": "llm", "model": modelSpec}
-    _summaryCache[cacheKey] = result
-    if len(_summaryCache) > 64:
-        _summaryCache.pop(next(iter(_summaryCache)))
+    _cacheSummary(cacheKey, result)
     return result
 
 
 def reset() -> None:
     """Drop cached model-written summaries (keyed by conversation id, which means
     nothing in a different database); called by init() when the settings change."""
-    _summaryCache.clear()
+    with _summaryCacheLock:
+        _summaryCache.clear()
 
 
 def buildConversationReport(conversationId: int) -> dict:
